@@ -15,6 +15,7 @@ obj-$(CONFIG_OMAP_WATCHDOG) += omap_wdt.o
 obj-$(CONFIG_DESIGNWARE_WATCHDOG) += designware_wdt.o
 obj-$(CONFIG_ULP_WATCHDOG) += ulp_wdog.o
 obj-$(CONFIG_$(PHASE_)WDT) += wdt-uclass.o
+obj-$(CONFIG_WDT_AIROHA) += airoha_wdt.o
 obj-$(CONFIG_WDT_SANDBOX) += sandbox_wdt.o
 obj-$(CONFIG_WDT_ALARM_SANDBOX) += sandbox_alarm-wdt.o
 obj-$(CONFIG_WDT_APPLE) += apple_wdt.o

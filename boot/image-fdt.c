@@ -24,6 +24,7 @@
 #include <asm/io.h>
 #include <dm/ofnode.h>
 #include <tee/optee.h>
+#include <xr1710g_boot_recovery.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -736,7 +737,8 @@ int image_setup_libfdt(struct bootm_headers *images, void *blob, bool lmb)
 	if (CONFIG_IS_ENABLED(LMB) && lmb)
 		lmb_free(map_to_sysmem(blob), fdt_totalsize(blob), LMB_NONE);
 
-	ret = fdt_shrink_to_minimum(blob, 0);
+	ret = fdt_shrink_to_minimum(blob, IS_ENABLED(CONFIG_BOARD_XR1710G) ?
+				    xr1710g_boot_recovery_fdt_pad(images) : 0);
 	if (ret < 0)
 		goto err;
 	of_size = ret;

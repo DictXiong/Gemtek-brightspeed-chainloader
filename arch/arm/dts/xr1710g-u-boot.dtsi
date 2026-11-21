@@ -3,6 +3,15 @@
 #include "an7581-u-boot.dtsi"
 
 / {
+	soc {
+		watchdog@1fbf0100 {
+			compatible = "airoha,en7581-wdt";
+			reg = <0x0 0x1fbf0100 0x0 0x3c>;
+			clocks = <&scuclk EN7523_CLK_BUS>;
+			clock-names = "bus";
+		};
+	};
+
 	/*
 	 * The stock first-stage loader does not populate RAM size for the
 	 * second-stage image, so describe the verified 2 GiB layout here.

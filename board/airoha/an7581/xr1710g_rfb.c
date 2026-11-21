@@ -17,6 +17,7 @@
 #include <ubi_uboot.h>
 #undef crc32
 #include <u-boot/crc.h>
+#include <xr1710g_boot_recovery.h>
 #include <xr1710g_version.h>
 #include <linux/bitops.h>
 #include <linux/err.h>
@@ -810,6 +811,12 @@ int board_init(void)
 
 int run_http_recovery(void);
 
+int xr1710g_boot_recovery_http(void)
+{
+	puts("XR1710G: failsafe did not start, entering HTTP recovery\n");
+	return run_http_recovery();
+}
+
 static int xr1710g_recovery_button_pressed(void)
 {
 	struct gpio_desc rec_gpio;
@@ -835,7 +842,9 @@ static int xr1710g_recovery_button_pressed(void)
 int board_late_init(void)
 {
 	char boot_ubi[64];
+	const char *production_step = "run boot_production";
 	const char *ubi_part;
+	const char *old_boot_ubi;
 	const char *bootcmd;
 	const char *bootargs;
 	ulong recovery_addr;
@@ -861,9 +870,6 @@ int board_late_init(void)
 
 	xr1710g_sync_runtime_ethaddrs();
 	ubi_part = xr1710g_detect_ubi_part();
-	snprintf(boot_ubi, sizeof(boot_ubi),
-		 "ubi part %s && run boot_production", ubi_part);
-	env_set("boot_ubi", boot_ubi);
 	/*
 	 * The persistent environment is stored in the stock "uenv" MTD
 	 * partition, so a board programmed with the TTL guide keeps the vendor
@@ -891,6 +897,16 @@ int board_late_init(void)
 	if (!bootcmd || strstr(bootcmd, "flash "))
 		env_set("boot_production",
 			"run ubi_read_production && bootm ${loadaddr}#${bootconf}");
+	/* Keep custom boot scripts on the legacy path. */
+	old_boot_ubi = env_get("boot_ubi");
+	if (!old_boot_ubi ||
+	    !strcmp(old_boot_ubi, "ubi part system && run boot_production"))
+		production_step = xr1710g_production_step();
+	snprintf(boot_ubi, sizeof(boot_ubi), "ubi part %s && %s", ubi_part,
+		 production_step);
+	env_set("boot_ubi", boot_ubi);
+	xr1710g_boot_recovery_diag_route(!strcmp(production_step,
+					       "xr1710g_boot_production"));
 	/*
 	 * The vendor environment carries fdt_high from the stock boot flow.
 	 * That fixed ceiling forces the relocated DTB into a window that is

@@ -91,6 +91,13 @@ config WDT
 	  What exactly happens when the timer expires is up to a particular
 	  device/driver.
 
+config WDT_AIROHA
+	bool "Airoha EN7581 watchdog"
+	depends on WDT && ARCH_AIROHA && CLK
+	help
+	  Enable the Airoha EN7581 Timer3 watchdog.
+	  The timer runs at half the SoC bus clock.
+
 config WDT_APPLE
 	bool "Apple watchdog timer support"
 	depends on WDT

@@ -26,6 +26,7 @@
 #include <linux/sizes.h>
 #include <tpm-v2.h>
 #include <tpm_tcg2.h>
+#include <xr1710g_boot_recovery.h>
 #if defined(CONFIG_CMD_USB)
 #include <usb.h>
 #endif
@@ -1126,8 +1127,23 @@ int bootm_run_states(struct bootm_info *bmi, int states)
 	}
 
 	/* Now run the OS! We hope this doesn't return */
-	if (!ret && (states & BOOTM_STATE_OS_GO))
+	if (!ret && (states & BOOTM_STATE_OS_GO)) {
+		if (IS_ENABLED(CONFIG_BOARD_XR1710G) &&
+		    xr1710g_boot_recovery_handoff(images)) {
+			if (iflag)
+				enable_interrupts();
+			ret = xr1710g_boot_recovery_http();
+			if (!ret)
+				return 0;
+			if (iflag)
+				disable_interrupts();
+			printf("XR1710G: HTTP recovery unavailable (%d), booting normally\n",
+			       ret);
+		}
+		if (IS_ENABLED(CONFIG_BOARD_XR1710G))
+			xr1710g_boot_recovery_diag_finish(images, ret);
 		ret = boot_selected_os(BOOTM_STATE_OS_GO, bmi, boot_fn);
+	}
 
 	/* Deal with any fallout */
 err:
