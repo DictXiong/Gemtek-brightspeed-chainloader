@@ -13,63 +13,56 @@
 
 ---
 
+## XR1710G 自动恢复
+
+搭配支持协议的 Full AP OpenWrt，连续两次正常启动未通过本机就绪确认后会自动进入 OpenWrt failsafe。若 failsafe 也未就绪，下一次启动进入二级 U-Boot 的 HTTP 恢复页。正常系统中还可用 `reboot-to-uboot` 主动进入一次，日常 `reboot` 保持原行为。配套条件、混用行为和验收范围见 [XR1710G 自动启动恢复](docs/xr1710g-boot-recovery.md)。
+
 ## 1. 项目用途
 
 | 维度 | 说明 |
 |---|---|
 | 目标设备 | XR1710G（W1700K / W1701K）、XG2010G（Airoha AN7581，ARM64） |
 | 引导架构 | 三级串联：原厂 ECNT/AXON U-Boot（NAND 0x0，**不可改**）→ chainloader 槽位（NAND 0x600000，1 MiB，双入口）→ 内嵌二级 U-Boot（TEXT_BASE `0x81E00000`） |
-| 刷机入口 | 仅 TTL + TFTP 写入 chainloader 一次；之后所有固件/chainloader 升级均走 HTTP 恢复网页 |
+| 刷机入口 | 原厂设备用 TTL + TFTP 初装；已运行其他 U-Boot 的 XR1710G 可在其支持的入口迁移。二级启动后使用其 HTTP 恢复网页 |
 | 恢复能力 | HTTP Recovery Web UI：上传 OpenWrt `*-sysupgrade.itb`（`firmware` 目标）、上传 chainloader（`uboot` 目标）；只读备份下载 MTD / UBI 分区 |
 | 与 uboot-an758x 区别 | 本项目**保留**原厂前 6 MiB、chainloader 写在 0x600000；uboot-an758x 从 0x0 重写引导区并重建 UBI |
 
 适用的关键场景：在不动原厂引导区的前提下，给原厂机型刷入第三方 U-Boot + OpenWrt，
 并通过网页化的恢复模式降低后续维护门槛（无需再拆机 TTL）。
 
-- **硬性守卫**：若 `u-boot.bin` 内嵌的 commit 与当前 `git HEAD` 不一致，脚本直接报错退出
-  （避免把错误版本打包发布）；槽位体积超过 1 MiB（`0x100000`）也会报错退出。
+### 2. 首次迁移
 
+| 当前状态 | 迁移入口与产物 |
+| --- | --- |
+| 原厂 XR1710G / XG2010G | 用原生 `<机型>-chainloader-…-slot.bin`，按 [XR1710G TTL + TFTP](docs/flashing-xr1710g.md) 或 [XG2010G TTL + TFTP](docs/flashing-xg2010g.md) 操作。 |
+| XR1710G 已运行其他 U-Boot | 先确认现有 NAND 布局、升级入口和要求的槽位格式，再选择与当前引导器匹配的迁移包。部分引导器要求专用包装，不能把原生包当成通用导入格式。先备份当前引导槽、系统配置与需保留的分区。 |
 
-### 2. 首次刷入 chainloader（TTL + TFTP）
+已在本仓库的二级 U-Boot 上时，日常更新走本机 HTTP 恢复页的 `uboot` 上传项，使用对应机型的原生槽位。设备已运行 OpenWrt 且 `chainloader` 是可写的专用 MTD 分区时，也可按[通过 SSH 更新槽位](docs/ssh-flash-chainloader.md)操作，先确认来源、分区标签、1 MiB 容量与回读结果。
 
-完整步骤见 [docs/flashing-xr1710g.md](docs/flashing-xr1710g.md) 与
-[docs/flashing-xg2010g.md](docs/flashing-xg2010g.md)。要点：
+#### 本地构建槽位
 
-1. 拆机连接 TTL（3.3V，115200 8N1），网线接 10GbE 口，PC 设静态 IP `192.168.0.10`；
-2. PC 启动 TFTP 服务器，把 `xr1710g-chainloader-slot.bin` 放在其根目录；
-3. 上电打断进入**原厂 U-Boot 命令行**（提示符 `ECNT>`）；
-4. 在**原厂**提示符下加载并写入（以下命令来自刷机教程，且只能在该提示符执行）：
+需要 AArch64 交叉工具链和 U-Boot 构建依赖，见 [CI 安装清单](.github/workflows/build.yml)。以下为 XR1710G 构建，XG2010G 原生槽位使用相同流程并替换机型名。
 
 ```sh
-setenv serverip 192.168.0.10
-setenv ipaddr 192.168.0.1
-tftpboot 0x81800000 xr1710g-chainloader-slot.bin
-
-setenv one "flash read 0x600000 0x100000 \$loadaddr"
-setenv two "; bootm"
-setenv bootcmd "$one$two"
-saveenv
-flash erase 0x600000 0x100000
-flash write 0x600000 0x100000 0x81800000
-reset
+./scripts/build.sh xr1710g
+./chainloader/build-chainloader-fit.sh output/xr1710g/u-boot.bin out \
+  build/xr1710g/tools/mkimage build/xr1710g/tools/dumpimage xr1710g
 ```
 
-5. 可选：顺手把原厂一级配方的 `flash read` 长度从 `0x4000000` 改成 `0x100000`
-   （读 64 MiB → 读 1 MiB，这是启动耗时里最大的一项）；
-   完整说明见刷机教程「缩短原厂一级 U-Boot 的读取长度」一节。
+从 `out` 取带版本的 `xr1710g-chainloader-…-slot.bin`。原厂串口写入 1 MiB 时，先按对应教程核对整槽镜像和填充规则。原生 HTTP 上传使用脚本输出的原始槽位长度。两种入口都需要完整槽位，`u-boot.bin` 和 `u-boot.img` 只是构建中间产物。
 
-> ⚠️ 上面的 `saveenv` / `flash` 命令**只能在原厂 `ECNT>` 提示符**下执行。
-> 详见 §6 常见问题：`uenv` 分区被原厂与二级 U-Boot 共用，在 chainloader 里 `saveenv` 会
-> 覆盖原厂环境导致无法启动。
+需要为特定引导器重打包时，请先核对[兼容槽位的适用版本与构建说明](docs/build-compatibility-slots.md)。
+
+迁移二级引导后，使用[固件仓的首次安装和保留配置指南](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.md#首次安装和保留配置)。已有 OpenWrt 可按指南用原生 AP FIT 保配置升级，并确认状态卷与启动就绪。需要清洁安装时，在本仓库恢复网页使用 `firmware` 上传项，网页重建会为配套 FIT 预留状态卷。升级期间保持设备通电并与生产网络隔离。
 
 ### 3 HTTP 恢复模式刷机 / 升级
 
-上电3秒后按住 reset ，直到lede灯变色闪动，不可按住 reset在上电。进入恢复模式后：
+按对应机型和当前引导器的说明使用 Reset；配套 XR1710G 的 OpenWrt 也可用 `reboot-to-uboot`。进入恢复模式后：
 
 - PC 网卡设静态 `192.168.0.10 / 255.255.255.0`（网关留空），或 DHCP 自动获取；
 - 浏览器打开 <http://192.168.0.1>；
 - 上传 OpenWrt `*-sysupgrade.itb` 到 **`firmware`** 目标；
-- 日后升级 chainloader 本体，上传 `xr1710g-chainloader-*-slot.bin` 到 **`uboot`** 目标。
+- 日后升级 chainloader 本体，上传对应机型的完整槽位到 **`uboot`** 目标。
 
 ### 4 备份分区（只读下载）
 
@@ -167,7 +160,7 @@ recovery_size_uboot=0x100000
 - **TFTP 超时**：检查 PC IP（192.168.0.10）、TFTP 服务器已启动、文件名无误、网线插在 10GbE 口。
 - **`Wrong Image Format`**：镜像不对。确认使用的是 `xr1710g-chainloader-*-slot.bin`
   （文件名带版本号与构建时间），不要刷 `u-boot.bin` / `u-boot.img` 或裸 `.itb`。
-- **恢复页面打不开**：确认按住 reset 上电进入恢复、PC 用 DHCP 或静态 `192.168.0.10`、
+- **恢复页面打不开**：确认已按当前引导器的说明进入恢复、PC 用 DHCP 或静态 `192.168.0.10`、
   访问 <http://192.168.0.1>。
 - **串口停在 `Unknown command 'flash'` 并自动重启（boot loop）**：旧 `uenv` 里残留的原厂
   配方 `flash read ...; bootm` 被二级 U-Boot 沿用，而 `flash` 命令在本 U-Boot 已不存在。
@@ -187,15 +180,11 @@ recovery_size_uboot=0x100000
   所以 GDM2 一帧都发不出。现已把 lan2 的 PCS bring-up 参数化后复用给 WAN
   （`BOOT-AND-RECOVERY-OPTIMIZATION.md` §5，根因归档见其 §10 坑 5）。
   逐项判据见该文档 §12。
-- **本机没有 aarch64 交叉工具链，所有 C 改动未经编译验证**：请在 CI / 有工具链的环境构建
-  （详见 §7 已知限制）。
 
 ---
 
 ## 7. 已知限制
 
-- **无交叉工具链验证**：作者机器没有 aarch64 工具链，本仓库的 C 改动未在本地编译验证过；
-  需在 GitHub Actions（`build.yml`，`workflow_dispatch`）或有工具链的环境中构建确认。
 - **UBI 写入缺少回读校验**：raw MTD 写入有逐擦除块校验（`recovery_mtd_verify_write`），
   但 `recovery_write_ubi_target` 写完后仅做 `ubi_check_volume()`，未做回读比对。
   该改动落在写路径、出错即变砖，本次未盲改。
@@ -210,11 +199,11 @@ recovery_size_uboot=0x100000
 ## 交流与支持 / Community
 
 - **QQ 群：571318173**（刷机、构建、分享）
-- GitHub 仓库与 Release：<https://github.com/naoki66/Gemtek-brightspeed-chainloader>
-  （Release 每机型仅一个 `*-slot.bin` 文件）
+- 上游项目：[naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader)
 
 ## 文档索引 / Docs
 
+- [XR1710G 自动启动恢复](docs/xr1710g-boot-recovery.md)
 - [docs/flashing-xr1710g.md](docs/flashing-xr1710g.md) — XR1710G（W1700K / W1701K）TTL 刷机教程
 - [docs/flashing-xg2010g.md](docs/flashing-xg2010g.md) — XG2010G 刷机教程
 - [docs/ssh-flash-chainloader.md](docs/ssh-flash-chainloader.md) — 通过 SSH 在线刷写 chainloader（XR1710G / XG2010G，无需 TTL）

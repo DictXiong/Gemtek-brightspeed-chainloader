@@ -1,38 +1,34 @@
-# XR1710G boot recovery
+# XR1710G 自动启动恢复
 
-The XR1710G chainloader uses automatic boot recovery when the selected
-`config-1` of an OpenWrt FIT includes `dictxiong,boot-recovery-protocol = <1>`
-and `dictxiong,boot-recovery-image`, a 64-character lowercase hex image ID.
-The standard production path must read the FIT from the `fit` volume in
-`system` on the stock layout. This keeps ordinary `bootm`, network-loaded
-images, custom recipes and WIRO-converted FITs on their usual boot paths.
-Older images use the normal boot path. The firmware opts in to recovery only
-when the chainloader supplies the matching runtime handshake in `/chosen`.
-RESET button recovery, the vendor environment and HTTP recovery network
-settings keep their usual behavior.
+XR1710G 在配套二级 U-Boot 和支持协议的 Full AP OpenWrt 固件上，可在没有串口的情况下自动进入恢复环境。原厂一级引导保持在原来的位置。
 
-The state uses one logical eraseblock in a dedicated dynamic UBI volume named
-`xr_boot_state` on the existing `system` partition. The chainloader can
-create the volume if at least one logical eraseblock is free. Existing
-installations whose `rootfs_data` takes all available space need one LEB
-reserved before recovery can be enabled. A full UBI rebuild can remove that
-reservation. Without writable state the chainloader boots normally, leaving
-the existing volumes in place.
+## 启动与恢复
 
-Two normal attempts that restart before the firmware confirms management
-readiness lead to a failsafe attempt. If failsafe also restarts before it is
-ready, the chainloader consumes the failure record and starts the existing
-HTTP recovery server. A subsequent reboot can try the normal path again.
-When recovery is armed at the Linux handoff, the Airoha watchdog starts with
-a 24-second hardware timeout, and the kernel command line permits automatic
-watchdog feeding for at most 30 seconds before user space opens the device.
-An ordinary boot uses its usual watchdog settings.
+1. 正常启动必须在规定时间内确认本机可管理。OpenWrt 检查可写 UBIFS overlay、已配置地址的管理接口、Dropbear，以及启用无线 AP 时的 hostapd。确认成功后，看门狗恢复常规喂狗行为。
+2. 连续两次正常启动因未确认而重启，下一次进入 OpenWrt failsafe。配套固件使用静态地址 `192.168.1.1` 和临时 SSH 主机密钥。成功启动后可以修复配置并正常重启。请用电脑直连，保持设备与生产网络隔离。
+3. 若 failsafe 也未确认就重启，二级 U-Boot 先消费该记录，再启动原有 [HTTP 恢复](../README.md#3-http-恢复模式刷机--升级)。浏览器在 `192.168.0.1` 打开恢复页。修复后正常重启可再次尝试正常系统。
 
-The record is 48 bytes at the start of LEB 0. It contains ASCII `XRR1`, one
-byte each for version (1), mode (0 normal, 1 failsafe), normal attempt count
-(0–2), and status (0 pending, 1 ready), a nonzero 32-bit big-endian sequence
-number, the 32 raw bytes of the image ID, and a big-endian IEEE CRC32 of the
-first 44 bytes. Updates use UBI atomic LEB replacement. The runtime handshake
-is a NUL-terminated string, `1:<image>:<sequence>:<normal|failsafe>`, in the
-`dictxiong,boot-recovery` property. A ready acknowledgment applies to the
-image, sequence and mode of the current boot.
+正常 OpenWrt 中，root 也可显式运行 `reboot-to-uboot`。这需要当前启动已有支持一次性请求的握手和可写状态卷。二级 U-Boot 校验并消费请求后才进入 HTTP 恢复，随后重启仍按正常引导运行。
+
+恢复网络依赖可用的 NAND、设备引导链、以太网与相关共享控制器。单个网口没有链路时可换用健康网口。检测到特定 WAN DMA 初始化超时时，二级 U-Boot 可在读回确认后停用该通路，并继续在其他可用网口提供 HTTP 恢复。所有硬件故障或共享控制器失效不在这项保护的覆盖范围内。U-Boot 恢复页会提供 DHCP，接线应和其他 DHCP 服务隔离。
+
+## 混用与 UBI 空间
+
+| 组合 | 行为 |
+| --- | --- |
+| 新二级 U-Boot + 配套 Full AP 固件 + 可写的状态卷 | 启用自动恢复与一次性恢复请求 |
+| 新二级 U-Boot + 无协议标记的旧固件 | 正常启动原有固件，可手动进入 HTTP 恢复 |
+| 旧二级 U-Boot + 配套 Full AP 固件 | 正常启动，固件在没有匹配握手时保持原有启动行为 |
+| 配套版本但状态卷不可用 | 采用正常引导，无法跟踪自动恢复或提交一次性请求 |
+
+正常启动路径须从原生布局 `system` 分区的 `fit` 卷加载选定的 `config-1`。其他机型、源自 NAND `xr1710g-ubi` 布局的系统镜像、手工 `bootm` 和网络临时引导不启用这项策略。
+
+`xr_boot_state` 是一个 LEB 的 dynamic UBI 卷。二级 U-Boot 可在有可用 LEB 时创建它。网页用支持协议的 AP FIT 重建 UBI 时，会在剩余空间分配给 `rootfs_data` 前预留并校验该卷；传入格式错误的协议标记会报错。已有 OpenWrt 可依照[固件仓的首次安装和保留配置指南](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.md#首次安装和保留配置)保配置升级并验证状态卷。网页重建会重新部署，请先备份配置及需要保留的 overlay 数据。
+
+## 协议与验证
+
+- 选定 FIT 的 `config-1` 使用 `dictxiong,boot-recovery-protocol = <1>` 和一个 64 位小写十六进制的 `dictxiong,boot-recovery-image` 标识。二级 U-Boot 启动前写入原生状态卷并配置看门狗，同时把匹配的握手写入 Linux DTB 的 `/chosen`。
+- LEB 0 起始保存 48 字节记录，依次为 `XRR1`、版本 1、模式、正常启动尝试次数、状态、4 字节大端非零序号、32 字节原始镜像 ID 和前 44 字节的 IEEE CRC32（大端）。常规状态下模式为 0（normal）或 1（failsafe），状态为 0（pending）或 1（ready）。一次性请求使用已保留的模式/状态组合，在受支持的二级 U-Boot 中消费为正常记录。就绪回报必须匹配当前镜像 ID、序号和模式。
+- Linux 接管前硬件看门狗窗口为 24 秒，内核在用户空间打开该设备前最多代喂 30 秒。在配套固件的用户空间，正常模式就绪窗口为开机后 120 秒，failsafe 为 60 秒。
+- 启动降级、一次性 HTTP 进入与正常回程曾在 XR1710G 样机上实测，HTTP 恢复也在 WAN 与 10G LAN 上做过连通性实测。单口 DMA 初始化失败和最终网页 UBI 卷预留进行了主机回放；结果不等同于每个网口或真实硬件损坏均已通过验收。
+- 原生网页上传引导槽时检查两处格式标记，写入原始分区后逐块回读。已验证的[兼容槽位](build-compatibility-slots.md)另经对应引导器的校验器离线验证。网页重建系统时会分类原生 FIT 能力。刷写前请另用可信来源提供的 SHA256 核对所选镜像。
