@@ -4,6 +4,12 @@
 
 This fork provides U-Boot 2026.07 second-stage boot and web recovery for the Brightspeed/Gemtek XR1710G (W1700K / W1701K) and XG2010G. It runs in the 1 MiB slot at NAND offset `0x600000` on the stock layout, keeping the factory first stage in place. The source is based on [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader).
 
+> [!NOTE]
+> **Changes from naoki upstream**
+>
+> - Paired XR1710G Full Legacy AP images support [watchdog-backed recovery and one-shot `reboot-to-uboot`](docs/xr1710g-boot-recovery.en.md). A web rebuild [reserves the state volume](docs/xr1710g-boot-recovery.en.md#compatibility-and-state-volume) for those images.
+> - The fork updates the [XR1710G WAN packet path and LAN recovery for a specific DMA failure](docs/xr1710g-boot-recovery.en.md#ethernet-and-failure-boundaries), and provides [compatibility slot packaging](docs/build-compatibility-slots.md#english).
+
 | Model | Build target | Installation resources |
 | --- | --- | --- |
 | XR1710G (W1700K / W1701K) | `xr1710g` | [First installation via serial](docs/flashing-xr1710g.md) · [Full firmware](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.en.md) |

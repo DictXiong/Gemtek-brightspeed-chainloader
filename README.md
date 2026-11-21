@@ -4,6 +4,12 @@
 
 本项目为 Brightspeed/Gemtek XR1710G（W1700K / W1701K）和 XG2010G 提供基于 U-Boot 2026.07 的二级引导和网页恢复。它使用原厂 NAND 布局，在 `0x600000` 的 1 MiB 槽位运行，保留原厂一级引导。源码基于 [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader)。
 
+> [!NOTE]
+> **相对 naoki 上游的改动**
+>
+> - 配套 XR1710G Full Legacy AP 支持[看门狗分级恢复和一次性 `reboot-to-uboot`](docs/xr1710g-boot-recovery.md)。网页重建会为配套镜像[预留状态卷](docs/xr1710g-boot-recovery.md#兼容性和状态卷)。
+> - XR1710G 更新了 [WAN 收发路径及特定 DMA 故障时的 LAN 恢复](docs/xr1710g-boot-recovery.md#网口与故障边界)，并提供[兼容槽位封装](docs/build-compatibility-slots.md)。
+
 | 机型 | 构建目标 | 安装资料 |
 | --- | --- | --- |
 | XR1710G（W1700K / W1701K） | `xr1710g` | [串口首次安装](docs/flashing-xr1710g.md) · [Full 固件](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed) |
