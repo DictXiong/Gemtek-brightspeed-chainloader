@@ -137,8 +137,8 @@ reset
    *DHCP (192.168.0.2–192.168.0.50) also works; see the FAQ if the client never gets an address.*
 4. 上传 OpenWrt 固件 `*-sysupgrade.itb`（选择 `firmware` 目标），等待写入完成。
    *Upload the OpenWrt `*-sysupgrade.itb` (target `firmware`) and wait.*
-5. 日常升级都走 HTTP 恢复，无需再拆机 TTL；更新 chainloader 本身用 `uboot` 目标上传 `xr1710g-chainloader-<版本>-slot.bin`。
-   *Later upgrades all go through HTTP recovery — no more TTL. Update the chainloader itself via the `uboot` target.*
+5. 保留配置的固件升级用 OpenWrt 自带升级；清洁重装或升级二级槽位见[网页恢复](recovery-web.md)。配套 Full AP 的首次迁移见[固件操作指南](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/docs/xr1710g-ap-operations.md)。
+   *Use the running OpenWrt upgrader to keep settings. For a clean rebuild or second-stage update, see [web recovery](recovery-web.md). The [Full AP firmware guide](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/docs/xr1710g-ap-operations.en.md) covers first migration.*
 
 ## 4. 固件文件 / The firmware file
 

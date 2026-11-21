@@ -5,6 +5,9 @@
 > 只刷 `xr1710g-chainloader-<版本>-slot.bin` 或 `xg2010g-chainloader-<版本>-slot.bin`。
 > **不要刷 `u-boot.bin` / `u-boot.img`。**
 
+本页更新二级槽位。若只是更新 OpenWrt 固件，请使用当前系统自带升级。若当前引导器已有可用网页，也可按[网页恢复指南](recovery-web.md)更新槽位。
+
+
 ## 1. 确认目标分区
 
 ```sh
