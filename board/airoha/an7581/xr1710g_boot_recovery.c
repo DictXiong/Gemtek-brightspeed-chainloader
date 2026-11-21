@@ -22,6 +22,7 @@
 #define PROP_PROTOCOL "dictxiong,boot-recovery-protocol"
 #define PROP_IMAGE "dictxiong,boot-recovery-image"
 #define PROP_HANDSHAKE "dictxiong,boot-recovery"
+#define PROP_ONESHOT "dictxiong,boot-recovery-oneshot"
 #define PROP_DIAG "dictxiong,boot-recovery-diag"
 #define NOT_RUN -256
 #define BOOT_TIMEOUT_MS 24000
@@ -35,6 +36,7 @@
 
 /* Set only while the dedicated UBI read is being handed to bootm. */
 static const void *production_fit;
+static u32 oneshot_sequence;
 
 enum fit_check {
 	FIT_OK, FIT_VERIFY_OFF, FIT_ABSENT, FIT_SOURCE, FIT_CONFIG, FIT_OS,
@@ -76,7 +78,7 @@ void xr1710g_boot_recovery_diag_finish(struct bootm_headers *images,
 	const u32 *wdt_sample = airoha_wdt_start_sample();
 	u8 record[20 + AIROHA_WDT_START_SAMPLE_WORDS * 4] = { 'X', 'R', 'D', '1' };
 	void *fdt = images->ft_addr;
-	int chosen, i;
+	int chosen, i, ret = -FDT_ERR_NOTFOUND;
 	u16 room = diag.room < 0 ? U16_MAX : min_t(unsigned int, diag.room, U16_MAX - 1);
 
 	if (images->os.os != IH_OS_LINUX || !fdt || !images->ft_len)
@@ -99,12 +101,16 @@ void xr1710g_boot_recovery_diag_finish(struct bootm_headers *images,
 		record[3] = '2';
 		for (i = 0; i < AIROHA_WDT_START_SAMPLE_WORDS; i++)
 			put_unaligned_be32(wdt_sample[i], record + 20 + i * 4);
-		if (!fdt_setprop(fdt, chosen, PROP_DIAG, record, sizeof(record)))
-			return;
-		record[3] = '1';
+		ret = fdt_setprop(fdt, chosen, PROP_DIAG, record, sizeof(record));
 	}
-	if (fdt_setprop(fdt, chosen, PROP_DIAG, record, 20))
-		puts("XR1710G: unable to publish boot diagnostic\n");
+	if (ret) {
+		record[3] = '1';
+		if (fdt_setprop(fdt, chosen, PROP_DIAG, record, 20))
+			puts("XR1710G: unable to publish boot diagnostic\n");
+	}
+	/* Keep legacy diagnostic data when there is only room for one property. */
+	if (oneshot_sequence)
+		fdt_setprop_u32(fdt, chosen, PROP_ONESHOT, oneshot_sequence);
 }
 
 static const char *fit_rejected(int *result, enum fit_check reason)
@@ -117,6 +123,7 @@ enum recovery_mode {
 	MODE_NORMAL,
 	MODE_FAILSAFE,
 	MODE_HTTP,
+	MODE_HTTP_REQUEST,
 };
 
 enum boot_status {
@@ -397,6 +404,7 @@ static bool state_valid(const struct boot_state *state)
 static enum recovery_mode state_next(const struct boot_state *old,
 				     struct boot_state *state, const char *image)
 {
+	enum recovery_mode http = MODE_HTTP;
 	u32 sequence = 1;
 
 	memcpy(state->magic, "XRR1", sizeof(state->magic));
@@ -412,23 +420,28 @@ static enum recovery_mode state_next(const struct boot_state *old,
 			sequence = 1;
 	}
 
-	if (old && !memcmp(old->image, state->image, sizeof(state->image)) &&
-	    old->status == STATUS_PENDING) {
-		if (old->mode == MODE_FAILSAFE) {
-			/* Consume the failed attempt before offering HTTP recovery. */
+	if (old && !memcmp(old->image, state->image, sizeof(state->image))) {
+		/* v1 never produces a ready failsafe with zero normal attempts. */
+		if (old->mode == MODE_FAILSAFE &&
+		    (old->status == STATUS_PENDING || !old->normal_attempts)) {
+			if (old->status == STATUS_READY)
+				http = MODE_HTTP_REQUEST;
+			/* Consume the request or failed attempt before entering HTTP. */
 			state->status = STATUS_READY;
 			state->normal_attempts = 0;
-		} else if (old->normal_attempts == MAX_NORMAL_ATTEMPTS) {
-			state->mode = MODE_FAILSAFE;
-			state->normal_attempts = old->normal_attempts;
-		} else {
-			state->normal_attempts = old->normal_attempts + 1;
+		} else if (old->status == STATUS_PENDING) {
+			if (old->normal_attempts == MAX_NORMAL_ATTEMPTS) {
+				state->mode = MODE_FAILSAFE;
+				state->normal_attempts = old->normal_attempts;
+			} else {
+				state->normal_attempts = old->normal_attempts + 1;
+			}
 		}
 	}
 
 	put_unaligned_be32(sequence, state->sequence);
 	put_unaligned_be32(state_crc(state), state->crc);
-	return state->status == STATUS_READY ? MODE_HTTP : state->mode;
+	return state->status == STATUS_READY ? http : state->mode;
 }
 
 static void restore_bootargs(void *fdt, int chosen, const char *old_args)
@@ -485,6 +498,7 @@ bool xr1710g_boot_recovery_handoff(struct bootm_headers *images)
 	bool create, attempted = false;
 	int chosen, len, ret;
 
+	oneshot_sequence = 0;
 	if (!image || !fdt || !images->ft_len)
 		return false;
 
@@ -518,6 +532,16 @@ bool xr1710g_boot_recovery_handoff(struct bootm_headers *images)
 	}
 
 	mode = state_next(state_valid(&old) ? &old : NULL, &state, image);
+	if (mode == MODE_HTTP_REQUEST) {
+		/* Never recreate a manual request, even after an ambiguous write. */
+		diag.write = state_write(&state, false, NULL);
+		diag.stop = wdt_stop(wdt);
+		if (diag.write)
+			puts("XR1710G: recovery request consumption unverified, booting normally\n");
+		if (diag.stop)
+			puts("XR1710G: cannot stop boot watchdog, booting normally\n");
+		return !diag.write && !diag.stop;
+	}
 	if (mode == MODE_HTTP) {
 		diag.stop = ret = wdt_stop(wdt);
 		if (ret) {
@@ -525,7 +549,6 @@ bool xr1710g_boot_recovery_handoff(struct bootm_headers *images)
 			       ret);
 			return false;
 		}
-
 		diag.write = ret = state_write(&state, false, &attempted);
 		if (ret) {
 			if (attempted && (diag.restore = state_write(&old, false, NULL)))
@@ -570,6 +593,9 @@ bool xr1710g_boot_recovery_handoff(struct bootm_headers *images)
 		restore_bootargs(fdt, chosen, old_args);
 		printf("XR1710G: recovery handoff unavailable (%d), booting normally\n",
 		       ret);
+	} else if (mode == MODE_NORMAL) {
+		/* Optional capability scoped to this successful normal handoff. */
+		oneshot_sequence = get_unaligned_be32(state.sequence);
 	}
 
 out:
