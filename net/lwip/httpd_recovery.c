@@ -3594,20 +3594,30 @@ int fs_open_custom(struct fs_file *file, const char *name)
 	        return 1;
 	    }
 	    else if (!strcmp(p, "about")) {
+	        int json_len;
+#ifdef CONFIG_BOARD_XR1710G
+	        char json[704];
+	        char xpon[384];
+	        int xpon_len = airoha_recovery_xpon_json(xpon, sizeof(xpon));
+
+	        if (xpon_len < 0 || xpon_len >= (int)sizeof(xpon))
+	            xpon[0] = '\0';
+#else
 	        char json[320];
-	        int json_len =
+	        const char xpon[] = "";
+#endif
 #ifdef U_BOOT_DATE
-	            snprintf(json, sizeof(json),
-                     "{\"u_boot\":\"%s (%s - %s %s)\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	        json_len = snprintf(json, sizeof(json),
+                     "{\"u_boot\":\"%s (%s - %s %s)\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"%s}\n",
                      U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ,
                      BOARD_RELEASE_VERSION, BOARD_RELEASE_CREDIT,
-                     board_detect_ubi_version());
+                     board_detect_ubi_version(), xpon);
 #else
-            snprintf(json, sizeof(json),
-                     "{\"u_boot\":\"%s\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	        json_len = snprintf(json, sizeof(json),
+                     "{\"u_boot\":\"%s\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"%s}\n",
                      U_BOOT_VERSION, BOARD_RELEASE_VERSION,
                      BOARD_RELEASE_CREDIT,
-                     board_detect_ubi_version());
+                     board_detect_ubi_version(), xpon);
 #endif
         if (json_len < 0)
             return 0;
@@ -3617,6 +3627,20 @@ int fs_open_custom(struct fs_file *file, const char *name)
         return recovery_open_custom_response(file, "application/json",
 					     json, json_len);
     }
+#ifdef CONFIG_BOARD_XR1710G
+    else if (!strcmp(p, "netdiag")) {
+        struct netif *netif = net_lwip_get_netif();
+        char json[576];
+        int len;
+
+        len = airoha_recovery_wan_netdiag(netif ? netif->state : NULL,
+                                         json, sizeof(json));
+        if (len < 0 || len >= (int)sizeof(json))
+            return 0;
+        return recovery_open_custom_response(file, "application/json",
+                                             json, len);
+    }
+#endif
     /* Do not intercept favicon/index/ok/fail: served by fsdata */
     /* let fsdata handle others */
     return 0;
@@ -3674,6 +3698,12 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 	(void)http_request;
 	(void)http_request_len;
 	(void)connection;
+#ifdef CONFIG_BOARD_XR1710G
+	if (!strcmp(uri, "/netdiag")) {
+		strlcpy(response_uri, "/400.html", response_uri_len);
+		return ERR_ARG;
+	}
+#endif
 	/*
 	 * Throttle large uploads explicitly. Reboot has no request body, so keep
 	 * lwIP's automatic receive-window handling for that endpoint.

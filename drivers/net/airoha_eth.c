@@ -63,6 +63,9 @@
 #define SCU_SSR3 0x94
 #define SCU_ETH_XSI_SEL GENMASK(14, 13)
 #define SCU_ETH_XSI_USXGMII FIELD_PREP(SCU_ETH_XSI_SEL, 0x1)
+#define SCU_SSTR 0x9c
+#define SCU_PON_XSI_SEL GENMASK(10, 9)
+#define SCU_PON_XSI_USXGMII FIELD_PREP(SCU_PON_XSI_SEL, 0x1)
 #define SCU_GPIO_2ND_I2C_MODE 0x214
 #define SCU_GPIO_MDC_IO_MASTER_MODE BIT(14)
 #define SCU_GPIO_I2C_MASTER_MODE BIT(13)
@@ -473,10 +476,13 @@
 #define REG_FE_GDM_TX_ETH_PKT_CNT_L(_n) (GDM_BASE(_n) + 0x110)
 #define REG_FE_GDM_TX_ETH_DROP_CNT(_n) (GDM_BASE(_n) + 0x118)
 #define REG_FE_GDM_RX_OK_PKT_CNT_L(_n) (GDM_BASE(_n) + 0x148)
+#define REG_FE_GDM_RX_ERROR_DROP_CNT(_n) (GDM_BASE(_n) + 0x158)
+#define REG_FE_GDM_RX_ETH_PKT_CNT_L(_n) (GDM_BASE(_n) + 0x160)
 #define REG_FE_GDM_RX_ETH_DROP_CNT(_n) (GDM_BASE(_n) + 0x168)
 #define REG_FE_GDM_TX_OK_PKT_CNT_H(_n) (GDM_BASE(_n) + 0x280)
 #define REG_FE_GDM_TX_ETH_PKT_CNT_H(_n) (GDM_BASE(_n) + 0x288)
 #define REG_FE_GDM_RX_OK_PKT_CNT_H(_n) (GDM_BASE(_n) + 0x290)
+#define REG_FE_GDM_RX_ETH_PKT_CNT_H(_n) (GDM_BASE(_n) + 0x298)
 #define REG_QDMA_DBG_TX_BASE 0x0108
 #define REG_QDMA_DBG_RX_BASE 0x0208
 
@@ -710,6 +716,13 @@ struct airoha_ext_pcs {
 	bool ready;
 };
 
+struct airoha_wan_dma_diag {
+	u32 submitted, done, drop, timeout, last_ctrl;
+	u32 rx_sport2;
+	int last_rc;
+	u8 last_tx_qdma, last_rx_qdma;
+};
+
 struct airoha_eth {
 	void __iomem *fe_regs;
 	void __iomem *switch_regs;
@@ -730,6 +743,9 @@ struct airoha_eth {
 	u8 last_tx_fport;
 	u8 last_rx_fport;
 	bool wan_link_up;
+	bool wan_recovery_active;
+	bool wan_qdma1;
+	bool qdma1_isolated;
 	ulong wan_last_retry_ms;
 	bool gdm4_link_up;
 	bool gdm4_copper_link_up;
@@ -762,6 +778,7 @@ struct airoha_eth {
 	u32 last_rx_msg1;
 	u8 last_rx_head[32];
 	u8 last_rx_head_len;
+	struct airoha_wan_dma_diag wan_dma;
 	u32 tx_attempts;
 	u32 tx_ok;
 	u32 tx_err;
@@ -979,7 +996,8 @@ static void airoha_eth_gdm4_sync_rtl8261(struct airoha_eth *eth,
 					 struct airoha_ext_pcs *pcs,
 					 int phy_addr, u16 *speed);
 static void airoha_eth_gdm4_cdr_reset(struct airoha_ext_pcs *pcs);
-static void airoha_eth_gdm4_phya_init(struct airoha_ext_pcs *pcs);
+static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
+				     struct airoha_ext_pcs *pcs);
 static void airoha_eth_gdm4_pcs_init(struct airoha_eth *eth,
 				     struct airoha_ext_pcs *pcs);
 static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
@@ -990,6 +1008,7 @@ static bool airoha_rtl8261_host_update_enabled(void);
 static int airoha_usxgmii_link_up(struct airoha_ext_pcs *pcs);
 static int airoha_gdm4_pcs_link_up(struct airoha_ext_pcs *pcs);
 static int airoha_eth_gdm4_have_rx_signal(struct airoha_ext_pcs *pcs);
+static bool airoha_recovery_wan_service_enabled(const struct airoha_eth *eth);
 static void airoha_recovery_wan_ensure_ready(struct airoha_eth *eth);
 static void airoha_recovery_wan_prime(struct airoha_eth *eth);
 static bool airoha_qdma_ready(struct airoha_qdma *qdma);
@@ -1186,7 +1205,7 @@ static void airoha_eth_gdm4_link_up_config(struct airoha_eth *eth,
 	 * The lighter sequence can leave CDR/FreqDet state stale after retrain.
 	 */
 	airoha_eth_pcs_pre_config(pcs);
-	airoha_eth_gdm4_phya_init(pcs);
+	airoha_eth_gdm4_phya_init(eth, pcs);
 	airoha_eth_pcs_init_usxgmii(pcs);
 	airoha_eth_pcs_interrupt_init_usxgmii(pcs);
 	airoha_eth_pcs_post_config(pcs);
@@ -1226,13 +1245,53 @@ static void airoha_eth_gdm4_cdr_reset(struct airoha_ext_pcs *pcs)
 	airoha_rmw(pma, 0x818, BIT(24) | BIT(8), 0);
 }
 
-static void airoha_eth_gdm4_phya_init(struct airoha_ext_pcs *pcs)
+#define XPON_ANA_RX_IMPEDANCE 0x114
+#define XPON_PMA_TX_IMPEDANCE_P 0x264
+#define XPON_PMA_TX_IMPEDANCE_N 0x268
+#define XPON_RX_IMPEDANCE_MASK 0x03000000
+#define XPON_TX_IMPEDANCE_MASK 0x03010000
+
+struct airoha_xpon_impedance {
+	u32 rx, tx_p, tx_n;
+};
+
+static struct {
+	struct airoha_xpon_impedance first_before, written, after_pcs_reset;
+	bool sampled;
+} wan_impedance;
+
+static struct airoha_xpon_impedance
+airoha_xpon_read_impedance(struct airoha_ext_pcs *pcs)
+{
+	return (struct airoha_xpon_impedance) {
+		.rx = airoha_rr(pcs->ana, XPON_ANA_RX_IMPEDANCE) & XPON_RX_IMPEDANCE_MASK,
+		.tx_p = airoha_rr(pcs->pma, XPON_PMA_TX_IMPEDANCE_P) & XPON_TX_IMPEDANCE_MASK,
+		.tx_n = airoha_rr(pcs->pma, XPON_PMA_TX_IMPEDANCE_N) & XPON_TX_IMPEDANCE_MASK,
+	};
+}
+
+static void airoha_xpon_apply_impedance(struct airoha_ext_pcs *pcs)
+{
+	/* Match the AN7581 Linux copper PON PCS termination defaults. */
+	airoha_rmw(pcs->ana, XPON_ANA_RX_IMPEDANCE, XPON_RX_IMPEDANCE_MASK, 0x02000000);
+	airoha_rmw(pcs->pma, XPON_PMA_TX_IMPEDANCE_P, XPON_TX_IMPEDANCE_MASK, 0x01010000);
+	airoha_rmw(pcs->pma, XPON_PMA_TX_IMPEDANCE_N, XPON_TX_IMPEDANCE_MASK, 0x01010000);
+	wan_impedance.written = airoha_xpon_read_impedance(pcs);
+}
+
+static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
+				     struct airoha_ext_pcs *pcs)
 {
 	void __iomem *ana = pcs->ana;
 	void __iomem *pma = pcs->pma;
+	bool tune_wan = IS_ENABLED(CONFIG_BOARD_XR1710G) &&
+			pcs == &eth->wan_pcs && airoha_recovery_wan_service_enabled(eth);
 
 	if (!ana || !pma)
 		return;
+
+	if (tune_wan && !wan_impedance.sampled)
+		wan_impedance.first_before = airoha_xpon_read_impedance(pcs);
 
 	/* Enable analog common lane. */
 	airoha_rmw(ana, 0x0, 0, BIT(0));
@@ -1489,6 +1548,9 @@ static void airoha_eth_gdm4_phya_init(struct airoha_ext_pcs *pcs)
 	airoha_rmw(pma, 0x34c, 0, BIT(24) | BIT(16) | BIT(8) | BIT(0));
 	airoha_rmw(pma, 0x350, 0, BIT(0));
 
+	if (tune_wan)
+		airoha_xpon_apply_impedance(pcs);
+
 	udelay(200);
 	airoha_eth_gdm4_cdr_reset(pcs);
 
@@ -1503,6 +1565,11 @@ static void airoha_eth_gdm4_phya_init(struct airoha_ext_pcs *pcs)
 			   BIT(5) | BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0));
 	udelay(7000);
 	airoha_eth_gdm4_cdr_reset(pcs);
+
+	if (tune_wan) {
+		wan_impedance.after_pcs_reset = airoha_xpon_read_impedance(pcs);
+		wan_impedance.sampled = true;
+	}
 }
 
 static void airoha_eth_gdm4_pcs_init(struct airoha_eth *eth,
@@ -1515,7 +1582,7 @@ static void airoha_eth_gdm4_pcs_init(struct airoha_eth *eth,
 		return;
 
 	airoha_eth_pcs_pre_config(pcs);
-	airoha_eth_gdm4_phya_init(pcs);
+	airoha_eth_gdm4_phya_init(eth, pcs);
 	airoha_eth_pcs_init_usxgmii(pcs);
 	airoha_eth_pcs_interrupt_init_usxgmii(pcs);
 	airoha_eth_pcs_post_config(pcs);
@@ -1760,10 +1827,11 @@ static bool airoha_recovery_dual_service_enabled(void)
  * the WAN port.  Force a front port to keep the WAN side out of the recovery
  * datapath (PHY8 is then powered down and its traffic dropped).
  */
-static bool airoha_recovery_wan_service_enabled(void)
+static bool airoha_recovery_wan_service_enabled(const struct airoha_eth *eth)
 {
-	return airoha_recovery_port_is_wan() ||
-	       airoha_recovery_dual_service_enabled();
+	return !eth->qdma1_isolated &&
+	       (airoha_recovery_port_is_wan() ||
+		airoha_recovery_dual_service_enabled());
 }
 
 bool airoha_recovery_dhcp_rx_allowed(struct udevice *dev)
@@ -1794,7 +1862,7 @@ bool airoha_recovery_dhcp_rx_allowed(struct udevice *dev)
 	if (eth->last_rx_fport == 1 || eth->last_rx_fport == 4)
 		return true;
 
-	return airoha_recovery_wan_service_enabled() &&
+	return airoha_recovery_wan_service_enabled(eth) &&
 	       eth->last_rx_fport == 2;
 }
 
@@ -1967,7 +2035,8 @@ static bool airoha_gdm4_use_cdm2(struct airoha_eth *eth)
 {
 	bool use_cdm2 = false;
 
-	(void)eth;
+	if (eth->qdma1_isolated)
+		return false;
 
 	/*
 	 * Keep recovery on the CDM1/QDMA0 datapath by default. The optional
@@ -1983,8 +2052,7 @@ static bool airoha_gdm4_loopback_enabled(struct airoha_eth *eth)
 {
 	bool loopback = false;
 
-	(void)eth;
-	if (airoha_recovery_wan_service_enabled())
+	if (eth->qdma1_isolated || airoha_recovery_wan_service_enabled(eth))
 		return false;
 
 	/*
@@ -2007,8 +2075,13 @@ static u32 airoha_recovery_gdm2_fwd_port(struct airoha_eth *eth)
 	if (airoha_gdm4_loopback_enabled(eth))
 		return FE_PSE_PORT_GDM4;
 
-	return airoha_recovery_wan_service_enabled() ?
+	return airoha_recovery_wan_service_enabled(eth) ?
 	       FE_PSE_PORT_PPE1 : FE_PSE_PORT_DROP;
+}
+
+static u32 airoha_recovery_gdm2_cport(const struct airoha_eth *eth)
+{
+	return eth->wan_qdma1 ? FE_PSE_PORT_CDM2 : FE_PSE_PORT_CDM1;
 }
 
 static void airoha_gdm4_update_loopback(struct airoha_eth *eth)
@@ -2041,8 +2114,14 @@ static void airoha_gdm4_update_loopback(struct airoha_eth *eth)
 		airoha_fe_clear(eth, REG_FE_VIP_PORT_EN, BIT(2));
 		airoha_fe_clear(eth, REG_FE_IFC_PORT_EN, BIT(2));
 	} else {
-		airoha_fe_wr(eth, REG_GDM_TXCHN_EN(2), 0);
-		airoha_fe_wr(eth, REG_GDM_RXCHN_EN(2), 0);
+		if (eth->wan_recovery_active && gdm2_fwd_port == FE_PSE_PORT_PPE1) {
+			airoha_fe_wr(eth, REG_GDM_TXCHN_EN(2), U32_MAX);
+			airoha_fe_rmw(eth, REG_GDM_RXCHN_EN(2),
+				      GENMASK(15, 0), GENMASK(15, 0));
+		} else {
+			airoha_fe_wr(eth, REG_GDM_TXCHN_EN(2), 0);
+			airoha_fe_wr(eth, REG_GDM_RXCHN_EN(2), 0);
+		}
 		airoha_fe_clear(eth, REG_GDM_LPBK_CFG(2),
 					LPBK_CHAN_MASK | LPBK_MODE_MASK |
 						LBK_GAP_MODE_MASK | LBK_LEN_MODE_MASK |
@@ -2129,7 +2208,7 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM2),
 		      DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
-				 FE_PSE_PORT_CDM1));
+				 airoha_recovery_gdm2_cport(eth)));
 	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(1, FE_PSE_PORT_GDM2),
 		      DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
@@ -3614,7 +3693,7 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	       tag ? tag : "diag", ppe1_route, ppe2_route, sp_cport, fc_map6,
 	       airoha_gdm4_use_cdm2(eth), airoha_gdm4_loopback_enabled(eth),
 	       gdm4_fwd, gdm4_src, gdm4_src_legacy, gdm2_fwd, gdm2_lpbk,
-	       gdm2_txch, gdm2_rxch, airoha_recovery_wan_service_enabled(),
+	       gdm2_txch, gdm2_rxch, airoha_recovery_wan_service_enabled(eth),
 	       airoha_mdio_link_up(eth, RTL8261_PHY8_ADDR), eth->wan_pcs.ready,
 	       airoha_gdm4_pcs_link_up(&eth->wan_pcs),
 	       airoha_usxgmii_link_up(&eth->wan_pcs),
@@ -4196,7 +4275,8 @@ static void airoha_rtl8261_minimal_init(struct airoha_eth *eth)
 		return;
 
 	airoha_rtl8261_init_one(eth, RTL8261_PHY5_ADDR);
-	airoha_rtl8261_init_one(eth, RTL8261_PHY8_ADDR);
+	if (!eth->qdma1_isolated)
+		airoha_rtl8261_init_one(eth, RTL8261_PHY8_ADDR);
 }
 
 static void airoha_rtl8261_read_phy_props(struct airoha_eth *eth, ofnode mdio_node)
@@ -4387,6 +4467,13 @@ static void airoha_recovery_set_default_fport(struct airoha_eth *eth, u8 fport)
 
 static bool airoha_recovery_wan_up(struct airoha_eth *eth)
 {
+	bool copper_up;
+
+	if (IS_ENABLED(CONFIG_BOARD_XR1710G))
+		return !eth->qdma1_isolated &&
+		       !airoha_rtl8261_copper_get(eth, RTL8261_PHY8_ADDR,
+						 &copper_up, NULL) && copper_up;
+
 	return airoha_mdio_link_up(eth, 8);
 }
 
@@ -4433,7 +4520,7 @@ static void airoha_recovery_wan_ensure_ready(struct airoha_eth *eth)
 {
 	ulong now = get_timer(0);
 
-	if (!airoha_recovery_wan_service_enabled() || !eth->wan_pcs.ready)
+	if (!airoha_recovery_wan_service_enabled(eth) || !eth->wan_pcs.ready)
 		return;
 
 	if (eth->wan_link_up && airoha_usxgmii_link_up(&eth->wan_pcs) &&
@@ -4484,7 +4571,7 @@ static void airoha_gdm4_recovery_prime(struct airoha_eth *eth)
  */
 static void airoha_recovery_wan_prime(struct airoha_eth *eth)
 {
-	if (!airoha_recovery_wan_service_enabled())
+	if (!airoha_recovery_wan_service_enabled(eth))
 		return;
 
 	airoha_eth_gdm4_pcs_init(eth, &eth->wan_pcs);
@@ -4595,7 +4682,7 @@ static void airoha_recovery_retry_pending_wakes(struct airoha_eth *eth, ulong no
 			       RTL8261_PHY5_ADDR, ret);
 	}
 	if (eth->rtl8261_phy8_wake_pending) {
-		if (!airoha_recovery_wan_service_enabled()) {
+		if (!airoha_recovery_wan_service_enabled(eth)) {
 			eth->rtl8261_phy8_wake_pending = false;
 		} else {
 			ret = airoha_recovery_rtl8261_set_power(eth,
@@ -4734,7 +4821,7 @@ void airoha_recovery_restart_links(struct udevice *dev)
 	bool cycle_lan = airoha_recovery_port_is_1g() ||
 			 airoha_recovery_dual_service_enabled();
 	bool cycle_10g = airoha_recovery_accept_gdm4_rx();
-	bool serve_wan = airoha_recovery_wan_service_enabled();
+	bool serve_wan = airoha_recovery_wan_service_enabled(eth);
 	bool flap_links = airoha_recovery_link_flap_enabled();
 	bool lan_cycle = false;
 	ulong down_ms;
@@ -4928,10 +5015,15 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 		return forced_fport;
 	}
 
+	/* Auto replies use learned ingress. New peers default to switch LAN. */
+	dual_service = airoha_recovery_dual_service_enabled();
+	if (IS_ENABLED(CONFIG_BOARD_XR1710G) && dual_service &&
+	    eth->default_tx_fport == 1)
+		return 1;
+
 	lan_up = airoha_recovery_lan_up(eth);
 	wan_up = airoha_recovery_wan_up(eth);
 	gdm4_candidate = airoha_recovery_gdm4_candidate(eth);
-	dual_service = airoha_recovery_dual_service_enabled();
 
 	if (dual_service && gdm4_candidate)
 		airoha_gdm4_ensure_ready(eth);
@@ -5149,8 +5241,8 @@ static int airoha_fe_init(struct airoha_eth *eth)
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4), FE_PSE_PORT_PPE1);
 	/*
 	 * Linux assigns the PPE default CPU port per GDM netdev in ndo_init.
-	 * Recovery only needs PPE1 and QDMA0, so route traffic received by PPE1
-	 * back to CDM1 explicitly. GDM4 is FE/PSE port 9, so its default CPU-port
+	 * Recovery uses PPE1. During probe the WAN has not started its DMA
+	 * session and falls back to CDM1. GDM4 is FE/PSE port 9, so its CPU-port
 	 * entry lives in the next PPE default-cport register word rather than
 	 * alongside GDM1/GDM2.
 	 */
@@ -5160,7 +5252,7 @@ static int airoha_fe_init(struct airoha_eth *eth)
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM1),
 				 FE_PSE_PORT_CDM1) |
 			      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
-					 FE_PSE_PORT_CDM1));
+					 airoha_recovery_gdm2_cport(eth)));
 	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM4),
 		      DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
@@ -5623,22 +5715,26 @@ static void airoha_qdma_stop_dma(struct airoha_qdma *qdma)
 		       (int)(qdma - qdma->eth->qdma), val);
 }
 
-static int airoha_qdma_wait_tx_done(struct airoha_qdma_desc *desc)
+static int airoha_qdma_wait_tx_done(struct airoha_qdma_desc *desc, u32 *last_ctrl)
 {
 	int elapsed;
+	u32 ctrl = 0;
 
 	for (elapsed = 0; elapsed < AIROHA_RECOVERY_TX_TIMEOUT_US; elapsed++) {
-		u32 ctrl;
-
 		dma_unmap_unaligned(virt_to_phys(desc), sizeof(*desc),
 				    DMA_FROM_DEVICE);
 		ctrl = le32_to_cpu(READ_ONCE(desc->ctrl));
-		if (ctrl & QDMA_DESC_DONE_MASK)
+		if (ctrl & QDMA_DESC_DONE_MASK) {
+			if (last_ctrl)
+				*last_ctrl = ctrl;
 			return 0;
+		}
 
 		udelay(1);
 	}
 
+	if (last_ctrl)
+		*last_ctrl = ctrl;
 	return -ETIMEDOUT;
 }
 
@@ -5727,6 +5823,8 @@ static int airoha_qdma_init(struct udevice *dev, struct airoha_eth *eth,
 
 static void airoha_recovery_runtime_reset(struct airoha_eth *eth)
 {
+	eth->wan_recovery_active = false;
+	eth->wan_qdma1 = false;
 	eth->default_tx_fport = 1;
 	eth->last_tx_fport = 0;
 	eth->last_rx_fport = 0;
@@ -5750,6 +5848,7 @@ static void airoha_recovery_runtime_reset(struct airoha_eth *eth)
 	eth->last_rx_ctrl = 0;
 	eth->last_rx_msg1 = 0;
 	eth->last_rx_head_len = 0;
+	eth->wan_dma = (struct airoha_wan_dma_diag) { .last_rc = -EAGAIN };
 	memset(eth->last_rx_head, 0, sizeof(eth->last_rx_head));
 	eth->tx_attempts = 0;
 	eth->tx_ok = 0;
@@ -5789,7 +5888,8 @@ static bool airoha_qdma_recovery_enabled(struct airoha_eth *eth,
 	if (qdma == &eth->qdma[0])
 		return true;
 
-	return qdma == &eth->qdma[1] && airoha_gdm4_use_cdm2(eth);
+	return qdma == &eth->qdma[1] &&
+	       (eth->wan_qdma1 || airoha_gdm4_use_cdm2(eth));
 }
 
 static struct airoha_qdma *airoha_active_qdma(struct airoha_eth *eth)
@@ -5809,6 +5909,9 @@ static struct airoha_qdma *airoha_active_qdma(struct airoha_eth *eth)
 
 static struct airoha_qdma *airoha_active_tx_qdma(struct airoha_eth *eth, u8 fport)
 {
+	if (fport == 2 && eth->wan_qdma1)
+		return &eth->qdma[1];
+
 	/*
 	 * Only the external 10G serdes path uses the Linux-like CDM2/QDMA1
 	 * topology. Keep 1G switch traffic on QDMA0 even when GDM4 loopback is
@@ -5847,6 +5950,81 @@ static int airoha_recovery_tx_qid(struct airoha_eth *eth, u8 fport)
 	return 0;
 }
 
+#ifdef CONFIG_BOARD_XR1710G
+static struct {
+	bool ran;
+	int before, asserted, released;
+	int pon_xsi, wan_sel;
+	int rc[4];
+} wan_xpon;
+
+static int airoha_xpon_reset_state(struct regmap *map)
+{
+	u32 mac, phy;
+	int ret;
+
+	ret = regmap_read(map, SCU_RST_CTRL1, &mac);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, SCU_RST_CTRL2, &phy);
+	if (ret)
+		return ret;
+	return (mac & SCU_RST_XPON_MAC ? 1 : 0) |
+	       (phy & SCU_RST_XPON_PHY ? 2 : 0);
+}
+
+static void airoha_recovery_xpon_reset(struct regmap *map)
+{
+	u32 value;
+	int ret;
+
+	wan_xpon.before = airoha_xpon_reset_state(map);
+	wan_xpon.rc[0] = regmap_update_bits(map, SCU_RST_CTRL1, SCU_RST_XPON_MAC,
+					     SCU_RST_XPON_MAC);
+	wan_xpon.rc[1] = regmap_update_bits(map, SCU_RST_CTRL2, SCU_RST_XPON_PHY,
+					     SCU_RST_XPON_PHY);
+	wan_xpon.asserted = airoha_xpon_reset_state(map);
+	/* Always attempt both releases even if a preceding operation failed. */
+	wan_xpon.rc[2] = regmap_update_bits(map, SCU_RST_CTRL2, SCU_RST_XPON_PHY, 0);
+	wan_xpon.rc[3] = regmap_update_bits(map, SCU_RST_CTRL1, SCU_RST_XPON_MAC, 0);
+	wan_xpon.released = airoha_xpon_reset_state(map);
+	ret = regmap_read(map, SCU_SSTR, &value);
+	wan_xpon.pon_xsi = ret ? ret : (int)FIELD_GET(SCU_PON_XSI_SEL, value);
+	ret = regmap_read(map, SCU_WAN_CONF, &value);
+	wan_xpon.wan_sel = ret ? ret : (int)FIELD_GET(SCU_WAN_SEL, value);
+	wan_xpon.ran = true;
+}
+
+int airoha_recovery_xpon_json(char *buf, size_t size)
+{
+	int len;
+
+	if (!wan_xpon.ran)
+		len = snprintf(buf, size, ",\"wan_xpon\":null");
+	else
+		len = snprintf(buf, size,
+			",\"wan_xpon\":{\"before\":%d,\"asserted\":%d,\"released\":%d,"
+			"\"pon_xsi\":%d,\"wan_sel\":%d,\"rc\":[%d,%d,%d,%d]}",
+			wan_xpon.before, wan_xpon.asserted, wan_xpon.released,
+			wan_xpon.pon_xsi, wan_xpon.wan_sel, wan_xpon.rc[0],
+			wan_xpon.rc[1], wan_xpon.rc[2], wan_xpon.rc[3]);
+	if (len < 0 || (size_t)len >= size)
+		return len;
+	if (!wan_impedance.sampled)
+		return len + snprintf(buf + len, size - len, ",\"wan_impedance\":null");
+	return len + snprintf(buf + len, size - len,
+			",\"wan_impedance\":{"
+			"\"first_before\":[\"%08x\",\"%08x\",\"%08x\"],"
+			"\"written\":[\"%08x\",\"%08x\",\"%08x\"],"
+			"\"after_pcs_reset\":[\"%08x\",\"%08x\",\"%08x\"]}",
+			wan_impedance.first_before.rx, wan_impedance.first_before.tx_p,
+			wan_impedance.first_before.tx_n, wan_impedance.written.rx,
+			wan_impedance.written.tx_p, wan_impedance.written.tx_n,
+			wan_impedance.after_pcs_reset.rx, wan_impedance.after_pcs_reset.tx_p,
+			wan_impedance.after_pcs_reset.tx_n);
+}
+#endif
+
 static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 {
 	int ret, i;
@@ -5864,8 +6042,16 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 	if (eth->scu_regmap) {
 		regmap_update_bits(eth->scu_regmap, SCU_SSR3, SCU_ETH_XSI_SEL,
 				   SCU_ETH_XSI_USXGMII);
+		if (IS_ENABLED(CONFIG_BOARD_XR1710G) &&
+		    airoha_recovery_wan_service_enabled(eth))
+			regmap_update_bits(eth->scu_regmap, SCU_SSTR,
+					   SCU_PON_XSI_SEL, SCU_PON_XSI_USXGMII);
 		regmap_update_bits(eth->scu_regmap, SCU_WAN_CONF, SCU_WAN_SEL,
 				   SCU_WAN_SEL_USXGMII);
+#ifdef CONFIG_BOARD_XR1710G
+		if (airoha_recovery_wan_service_enabled(eth))
+			airoha_recovery_xpon_reset(eth->scu_regmap);
+#endif
 	}
 
 	mdelay(20);
@@ -5893,9 +6079,26 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 		return ret;
 
 	for (i = 0; i < ARRAY_SIZE(eth->qdma); i++) {
-		ret = airoha_qdma_init(dev, eth, &eth->qdma[i]);
-		if (ret)
+		struct airoha_qdma *qdma = &eth->qdma[i];
+		u32 dma_enable = GLOBAL_CFG_TX_DMA_EN_MASK | GLOBAL_CFG_RX_DMA_EN_MASK;
+
+		ret = airoha_qdma_init(dev, eth, qdma);
+		if (!ret)
+			continue;
+		/*
+		 * A QDMA1 forward-queue timeout leaves DMA stopped and the
+		 * allocated backing buffers intact. Keep QDMA0 available for
+		 * the LAN ports if QDMA1 can be held disabled.
+		 */
+		if (!IS_ENABLED(CONFIG_BOARD_XR1710G) || i != 1 ||
+		    ret != -ETIMEDOUT || airoha_recovery_port_is_wan())
 			return ret;
+		airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG, dma_enable);
+		if (airoha_qdma_rr(qdma, REG_QDMA_GLOBAL_CFG) & dma_enable)
+			return ret;
+		eth->qdma1_isolated = true;
+		qdma->regs = NULL;
+		printf("airoha: QDMA1 setup timed out, continuing with LAN recovery\n");
 	}
 
 	return 0;
@@ -6140,7 +6343,11 @@ static int airoha_eth_probe(struct udevice *dev)
 static int airoha_eth_init(struct udevice *dev)
 {
 	struct airoha_eth *eth = dev_get_priv(dev);
+	bool wan_recovery;
 	int i, ret;
+
+	if (eth->qdma1_isolated && airoha_recovery_port_is_wan())
+		return -ENODEV;
 
 	airoha_recovery_runtime_reset(eth);
 	/* Retry only RTL8261 PHYs whose earlier initialization did not finish. */
@@ -6150,7 +6357,7 @@ static int airoha_eth_init(struct udevice *dev)
 	 * (wan, auto or dual), not only in the WAN-only mode: a previous session
 	 * that forced a front port leaves PHY8 powered down.
 	 */
-	if (airoha_recovery_wan_service_enabled()) {
+	if (airoha_recovery_wan_service_enabled(eth)) {
 		ret = airoha_recovery_rtl8261_set_power(eth, RTL8261_PHY8_ADDR, true);
 		if (ret)
 			printf("airoha: PHY %d power-up failed: %d\n",
@@ -6159,6 +6366,11 @@ static int airoha_eth_init(struct udevice *dev)
 	airoha_switch_recovery_quiesce(eth);
 	airoha_fe_recovery_runtime_stop(eth);
 	airoha_recovery_lan_phy_set_power(eth, false, false);
+
+	/* Use the same DMA instance for WAN ingress and egress until stop. */
+	wan_recovery = IS_ENABLED(CONFIG_BOARD_XR1710G) &&
+		       airoha_recovery_wan_service_enabled(eth);
+	eth->wan_qdma1 = wan_recovery && airoha_qdma_ready(&eth->qdma[1]);
 
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
 		struct airoha_qdma *qdma = &eth->qdma[i];
@@ -6172,6 +6384,7 @@ static int airoha_eth_init(struct udevice *dev)
 			return ret;
 	}
 
+	eth->wan_recovery_active = wan_recovery;
 	airoha_fe_recovery_runtime_init(eth);
 	arht_eth_write_hwaddr(dev);
 
@@ -6202,6 +6415,7 @@ static void airoha_eth_stop(struct udevice *dev)
 
 	/* Block new ingress before waiting for the DMA engines to drain. */
 	airoha_switch_recovery_quiesce(eth);
+	eth->wan_recovery_active = false;
 	airoha_fe_recovery_runtime_stop(eth);
 
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
@@ -6218,6 +6432,20 @@ static void airoha_eth_stop(struct udevice *dev)
 	airoha_recovery_runtime_reset(eth);
 }
 
+static void airoha_recovery_record_wan_tx(struct airoha_eth *eth,
+					 const struct airoha_qdma *qdma, u32 ctrl, int ret)
+{
+	struct airoha_wan_dma_diag *wan = &eth->wan_dma;
+
+	wan->submitted++;
+	wan->done += !!(ctrl & QDMA_DESC_DONE_MASK);
+	wan->drop += !!(ctrl & QDMA_DESC_DROP_MASK);
+	wan->timeout += ret == -ETIMEDOUT;
+	wan->last_ctrl = ctrl;
+	wan->last_rc = ret;
+	wan->last_tx_qdma = qdma - eth->qdma;
+}
+
 static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 				     int length, u8 fport)
 {
@@ -6225,10 +6453,12 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	struct airoha_qdma *qdma;
 	struct airoha_qdma_desc *desc;
 	struct airoha_queue *q;
+	bool sample_wan = IS_ENABLED(CONFIG_BOARD_XR1710G) && fport == 2;
 	dma_addr_t dma_addr;
 	u32 msg0, msg1;
 	int qid, index;
 	u32 val;
+	u32 last_ctrl;
 	int ret;
 	int tx_length;
 
@@ -6268,7 +6498,7 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	q = &qdma->q_tx[qid];
 	desc = &q->desc[q->head];
 	if (q->pending) {
-		ret = airoha_qdma_wait_tx_done(desc);
+		ret = airoha_qdma_wait_tx_done(desc, NULL);
 		if (ret) {
 			eth->last_tx_ret = ret;
 			eth->tx_err++;
@@ -6306,7 +6536,10 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	airoha_qdma_rmw(qdma, REG_TX_CPU_IDX(qid), TX_RING_CPU_IDX_MASK,
 			FIELD_PREP(TX_RING_CPU_IDX_MASK, index));
 
-	ret = airoha_qdma_wait_tx_done(desc);
+	/* Use the same poll read for this descriptor, before clearing its IRQ. */
+	ret = airoha_qdma_wait_tx_done(desc, sample_wan ? &last_ctrl : NULL);
+	if (sample_wan)
+		airoha_recovery_record_wan_tx(eth, qdma, last_ctrl, ret);
 	if (ret) {
 		eth->last_tx_ret = ret;
 		eth->tx_err++;
@@ -6396,7 +6629,7 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 		 */
 		send_lan = true;
 		send_10g = airoha_recovery_accept_gdm4_rx();
-		send_wan = airoha_recovery_wan_service_enabled();
+		send_wan = airoha_recovery_wan_service_enabled(eth);
 		if (send_10g && airoha_recovery_gdm4_candidate(eth))
 			airoha_gdm4_ensure_ready(eth);
 
@@ -6534,6 +6767,11 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	sport = FIELD_GET(QDMA_ETH_RXMSG_SPORT_MASK, msg1);
 	crsn = FIELD_GET(QDMA_ETH_RXMSG_CRSN_MASK, msg1);
 	ppe_entry = FIELD_GET(QDMA_ETH_RXMSG_PPE_ENTRY_MASK, msg1);
+
+	if (IS_ENABLED(CONFIG_BOARD_XR1710G) && sport == 2) {
+		eth->wan_dma.rx_sport2++;
+		eth->wan_dma.last_rx_qdma = qdma_id;
+	}
 
 	/*
 	 * EN7581 reports GDM4 traffic as SPORT 0x18 in RX metadata,
@@ -6729,6 +6967,70 @@ U_BOOT_DRIVER(airoha_eth) = {
 	.priv_auto = sizeof(struct airoha_eth),
 	.plat_auto = sizeof(struct eth_pdata),
 };
+
+#ifdef CONFIG_BOARD_XR1710G
+static u64 airoha_gdm_read_packet_count(struct airoha_eth *eth, u32 high, u32 low)
+{
+	u32 first = airoha_fe_rr(eth, high);
+	u32 lo = airoha_fe_rr(eth, low);
+	u32 last = airoha_fe_rr(eth, high);
+
+	if (last != first)
+		lo = airoha_fe_rr(eth, low);
+	return ((u64)last << 32) | lo;
+}
+
+int airoha_recovery_wan_netdiag(struct udevice *dev, char *buf, size_t size)
+{
+	const struct airoha_wan_dma_diag *wan;
+	char wan_rate[72] = "null";
+	u32 tx_drop, rx_drop, rx_error_drop, cport;
+	u32 tx_chn_en, rx_chn_en;
+	struct airoha_eth *eth;
+	u64 tx_total, rx_total;
+
+	if (!dev || dev->driver != DM_DRIVER_GET(airoha_eth))
+		return -ENODEV;
+	eth = dev_get_priv(dev);
+	if (!eth || !eth->fe_regs)
+		return -ENODEV;
+	wan = &eth->wan_dma;
+
+	/* GDM2 is a single port. Read cumulative MIB registers without a selector. */
+	tx_total = airoha_gdm_read_packet_count(eth, REG_FE_GDM_TX_ETH_PKT_CNT_H(2),
+					       REG_FE_GDM_TX_ETH_PKT_CNT_L(2));
+	rx_total = airoha_gdm_read_packet_count(eth, REG_FE_GDM_RX_ETH_PKT_CNT_H(2),
+					       REG_FE_GDM_RX_ETH_PKT_CNT_L(2));
+	tx_drop = airoha_fe_rr(eth, REG_FE_GDM_TX_ETH_DROP_CNT(2));
+	rx_drop = airoha_fe_rr(eth, REG_FE_GDM_RX_ETH_DROP_CNT(2));
+	rx_error_drop = airoha_fe_rr(eth, REG_FE_GDM_RX_ERROR_DROP_CNT(2));
+	cport = FIELD_GET(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
+			  airoha_fe_rr(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM2)));
+	tx_chn_en = airoha_fe_rr(eth, REG_GDM_TXCHN_EN(2));
+	rx_chn_en = airoha_fe_rr(eth, REG_GDM_RXCHN_EN(2));
+	if (eth->wan_recovery_active && eth->wan_pcs.usxgmii && eth->wan_pcs.rate_adp)
+		snprintf(wan_rate, sizeof(wan_rate),
+			 "{\"pcs_an_control_7\":\"%08x\",\"rate_adapt_ctrl_11\":\"%08x\"}",
+			 airoha_rr(eth->wan_pcs.usxgmii, PCS_USXGMII_PCS_AN_CONTROL_7),
+			 airoha_rr(eth->wan_pcs.rate_adp, PCS_HSGMII_RATE_ADAPT_CTRL_11));
+
+	return snprintf(buf, size,
+				"{\"qdma1_isolated\":%s,"
+				"\"fport2_tx\":{\"submitted\":%u,\"done\":%u,\"drop\":%u,"
+			"\"timeout\":%u,\"last_ctrl\":\"%08x\",\"last_rc\":%d,\"last_qdma\":%d},"
+			"\"gdm2\":{\"cport\":%u,\"tx_total\":%llu,\"tx_drop\":%u,\"rx_total\":%llu,"
+			"\"rx_drop\":%u,\"rx_error_drop\":%u,"
+			"\"tx_chn_en\":\"%08x\",\"rx_chn_en\":\"%08x\"},\"wan_rate\":%s,"
+			"\"rx_sport2\":%u,\"rx_sport2_last_qdma\":%d}\n",
+				eth->qdma1_isolated ? "true" : "false",
+				wan->submitted, wan->done, wan->drop, wan->timeout,
+			wan->last_ctrl, wan->last_rc, wan->submitted ? wan->last_tx_qdma : -1,
+			cport, (unsigned long long)tx_total,
+			tx_drop, (unsigned long long)rx_total, rx_drop, rx_error_drop,
+			tx_chn_en, rx_chn_en, wan_rate,
+			wan->rx_sport2, wan->rx_sport2 ? wan->last_rx_qdma : -1);
+}
+#endif
 
 static int do_rtl8261_diag(struct cmd_tbl *cmdtp, int flag, int argc,
 			   char *const argv[])
