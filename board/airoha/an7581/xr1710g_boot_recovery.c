@@ -235,34 +235,20 @@ static int do_xr1710g_boot_production(struct cmd_tbl *cmdtp, int flag, int argc,
 U_BOOT_CMD(xr1710g_boot_production, 1, 0, do_xr1710g_boot_production,
 	   "boot the XR1710G production UBI FIT", "");
 
-static const char *recovery_image(const struct bootm_headers *images, int *result)
+static bool recovery_fdt_supported(const void *fdt)
 {
-	const void *fit = images->fit_hdr_os;
+	/* The WIRO conversion changes the DTB but keeps the FIT image ID. */
+	return !fdt_node_check_compatible(fdt, 0, "gemtek,xr1710g") &&
+	       fdt_node_check_compatible(fdt, 0, "gemtek,xr1710g-ubi") > 0;
+}
+
+static const char *recovery_fit_image_id(const void *fit, int config,
+				       int *result)
+{
 	const fdt32_t *protocol;
 	const char *id;
-	int config, len, i;
+	int len, i;
 
-	if (!images->verify)
-		return fit_rejected(result, FIT_VERIFY_OFF);
-	if (!fit)
-		return fit_rejected(result, FIT_ABSENT);
-	if (fit != production_fit)
-		return fit_rejected(result, FIT_SOURCE);
-	if (!images->fit_uname_cfg)
-		return fit_rejected(result, FIT_CONFIG);
-	if (images->os.os != IH_OS_LINUX)
-		return fit_rejected(result, FIT_OS);
-	if (strcmp(images->fit_uname_cfg, "config-1"))
-		return fit_rejected(result, FIT_CONFIG);
-
-	/* The WIRO conversion changes the DTB but keeps the FIT image ID. */
-	if (!images->ft_len || !images->ft_addr)
-		return fit_rejected(result, FIT_FDT);
-	if (fdt_node_check_compatible(images->ft_addr, 0, "gemtek,xr1710g") ||
-	    !fdt_node_check_compatible(images->ft_addr, 0, "gemtek,xr1710g-ubi"))
-		return fit_rejected(result, FIT_COMPAT);
-
-	config = fit_conf_get_node(fit, images->fit_uname_cfg);
 	if (config < 0)
 		return fit_rejected(result, FIT_CONFIG);
 
@@ -281,6 +267,108 @@ static const char *recovery_image(const struct bootm_headers *images, int *resul
 
 	*result = FIT_OK;
 	return id;
+}
+
+static const char *recovery_image(const struct bootm_headers *images, int *result)
+{
+	const void *fit = images->fit_hdr_os;
+
+	if (!images->verify)
+		return fit_rejected(result, FIT_VERIFY_OFF);
+	if (!fit)
+		return fit_rejected(result, FIT_ABSENT);
+	if (fit != production_fit)
+		return fit_rejected(result, FIT_SOURCE);
+	if (!images->fit_uname_cfg)
+		return fit_rejected(result, FIT_CONFIG);
+	if (images->os.os != IH_OS_LINUX)
+		return fit_rejected(result, FIT_OS);
+	if (strcmp(images->fit_uname_cfg, "config-1"))
+		return fit_rejected(result, FIT_CONFIG);
+
+	if (!images->ft_len || !images->ft_addr)
+		return fit_rejected(result, FIT_FDT);
+	if (!recovery_fdt_supported(images->ft_addr))
+		return fit_rejected(result, FIT_COMPAT);
+
+	return recovery_fit_image_id(fit, fit_conf_get_node(fit, "config-1"),
+				     result);
+}
+
+/* 1 requests a state volume, 0 preserves legacy upload handling. */
+int xr1710g_recovery_fit_state(const void *fit, size_t size)
+{
+	static const char *const external_props[] = {
+		"data-position", "data-offset", "data-size",
+	};
+	const void *data, *dtb = NULL;
+	const char *default_config, *os;
+	size_t data_size, dtb_size = 0, offset;
+	int config, configs, images, kernel, fdt, node, result;
+	int protocol_len, image_len, len, i;
+
+	/* Non-FIT uploads keep the original web recovery behavior. */
+	if (size < sizeof(fdt32_t) || fdt_magic(fit) != FDT_MAGIC)
+		return 0;
+	if (fdt_check_full(fit, size))
+		return -EINVAL;
+
+	config = fit_conf_get_node(fit, "config-1");
+	if (config == -FDT_ERR_NOTFOUND)
+		return 0;
+	if (config < 0)
+		return -EINVAL;
+
+	fdt_getprop(fit, config, PROP_PROTOCOL, &protocol_len);
+	fdt_getprop(fit, config, PROP_IMAGE, &image_len);
+	if (protocol_len == -FDT_ERR_NOTFOUND && image_len == -FDT_ERR_NOTFOUND)
+		return 0;
+	if (!recovery_fit_image_id(fit, config, &result))
+		return -EINVAL;
+
+	configs = fdt_path_offset(fit, FIT_CONFS_PATH);
+	default_config = fdt_getprop(fit, configs, FIT_DEFAULT_PROP, &len);
+	if (!default_config || len != sizeof("config-1") ||
+	    memcmp(default_config, "config-1", sizeof("config-1")))
+		return -EINVAL;
+
+	kernel = fit_conf_get_prop_node(fit, config, FIT_KERNEL_PROP, IH_PHASE_NONE);
+	if (kernel < 0)
+		return -EINVAL;
+	os = fdt_stringlist_get(fit, kernel, FIT_OS_PROP, 0, NULL);
+	if (!os || strcmp(os, "linux"))
+		return -EINVAL;
+
+	images = fdt_path_offset(fit, FIT_IMAGES_PATH);
+	fdt = fit_conf_get_prop_node(fit, config, FIT_FDT_PROP, IH_PHASE_NONE);
+	if (images < 0 || fdt < 0)
+		return -EINVAL;
+
+	/* Verify the actual upload extent before any FIT hash reads image data. */
+	fdt_for_each_subnode(node, fit, images) {
+		for (i = 0; i < ARRAY_SIZE(external_props); i++)
+			if (fdt_getprop(fit, node, external_props[i], &len) &&
+			    len != sizeof(fdt32_t))
+				return -EINVAL;
+
+		if (fit_image_get_data(fit, node, &data, &data_size) ||
+		    (uintptr_t)data < (uintptr_t)fit)
+			return -EINVAL;
+		offset = (uintptr_t)data - (uintptr_t)fit;
+		if (offset > size || data_size > size - offset)
+			return -EINVAL;
+		if (node == fdt) {
+			dtb = data;
+			dtb_size = data_size;
+		}
+	}
+
+	if (!dtb || fdt_check_full(dtb, dtb_size) || !recovery_fdt_supported(dtb))
+		return -EINVAL;
+	if (fit_config_verify(fit, config) || !fit_all_image_verify(fit))
+		return -EBADMSG;
+
+	return 1;
 }
 
 unsigned int xr1710g_boot_recovery_fdt_pad(const struct bootm_headers *images)
@@ -333,6 +421,23 @@ static int state_read(struct boot_state *state)
 		*state = *buf;
 
 	return ret;
+}
+
+int xr1710g_recovery_create_empty_state(void)
+{
+	struct boot_state state;
+	int ret = state_read(&state);
+
+	if (ret == -ENOENT) {
+		ret = ubi_create_vol(STATE_VOLUME, sizeof(state), true,
+				     UBI_VOL_NUM_AUTO, false);
+		if (!ret)
+			ret = state_read(&state);
+	}
+	if (ret)
+		return ret;
+
+	return memchr_inv(&state, 0xff, sizeof(state)) ? -EBADMSG : 0;
 }
 
 static int state_write(const struct boot_state *state, bool create,

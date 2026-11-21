@@ -45,6 +45,9 @@
 #else
 #include <xr1710g_version.h>
 #endif
+#ifdef CONFIG_BOARD_XR1710G
+#include <xr1710g_boot_recovery.h>
+#endif
 #include <timestamp.h>
 #include <limits.h>
 #include <miiphy.h>
@@ -3972,6 +3975,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	struct recovery_target target;
 	const u8 *image = recv_base;
 	u32 image_size = recv_off;
+#ifdef CONFIG_BOARD_XR1710G
+	bool reserve_boot_state = false;
+#endif
 	int ret;
 
 	post_ok = 0;
@@ -4010,6 +4016,18 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 	if (current_target == TARGET_FIRMWARE &&
 	    target.backend == RECOVERY_BACKEND_UBI) {
+#ifdef CONFIG_BOARD_XR1710G
+		if (!strcmp(target.ubi_part, "system") && !strcmp(target.name, "fit")) {
+			ret = xr1710g_recovery_fit_state(image, image_size);
+			if (ret < 0) {
+				printf("Invalid XR1710G recovery FIT: %d\n", ret);
+				recovery_release_target(&target);
+				prog_phase = -1;
+				return ret;
+			}
+			reserve_boot_state = ret > 0;
+		}
+#endif
 		ret = recovery_force_ubi_rebuild(&target);
 		if (ret) {
 			printf("Failed to select UBI %s rebuild target: %d\n",
@@ -4092,6 +4110,19 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 			return ret;
 		}
 
+#ifdef CONFIG_BOARD_XR1710G
+		if (reserve_boot_state) {
+			/* The overlay takes all LEBs left after this reservation. */
+			ret = xr1710g_recovery_create_empty_state();
+			if (ret) {
+				printf("Failed to reserve clean UBI volume 'xr_boot_state': %d\n",
+				       ret);
+				recovery_release_target(&target);
+				prog_phase = -1;
+				return ret;
+			}
+		}
+#endif
 		ret = recovery_ensure_rootfs_data(&target);
 		if (ret) {
 			recovery_release_target(&target);

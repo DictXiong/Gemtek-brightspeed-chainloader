@@ -8,6 +8,8 @@ const char *xr1710g_production_step(void);
 unsigned int xr1710g_boot_recovery_fdt_pad(const struct bootm_headers *images);
 bool xr1710g_boot_recovery_handoff(struct bootm_headers *images);
 int xr1710g_boot_recovery_http(void);
+int xr1710g_recovery_fit_state(const void *fit, size_t size);
+int xr1710g_recovery_create_empty_state(void);
 void xr1710g_boot_recovery_diag_route(bool native);
 void xr1710g_boot_recovery_diag_finish(struct bootm_headers *images,
                                       int http_result);
