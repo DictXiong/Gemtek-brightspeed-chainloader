@@ -1,8 +1,8 @@
-# XR1710G / XG2010G 二级 U-Boot 与网页恢复
+# XR1710G 二级 U-Boot 与网页恢复
 
 **简体中文** · [English](README.en.md)
 
-本项目为 Brightspeed/Gemtek XR1710G（W1700K / W1701K）和 XG2010G 提供基于 U-Boot 2026.07 的二级引导和网页恢复。它使用原厂 NAND 布局，在 `0x600000` 的 1 MiB 槽位运行，保留原厂一级引导。源码基于 [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader)。
+本项目维护 Brightspeed/Gemtek XR1710G（W1700K / W1701K）的 U-Boot 2026.07 二级引导和网页恢复。它使用原厂 NAND 布局，在 `0x600000` 的 1 MiB 槽位运行，保留原厂一级引导。源码基于 [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader)。XG2010G 请使用上游资料与构建，本 fork 的 CI 和发布仅覆盖 XR1710G。
 
 > [!NOTE]
 > **相对 naoki 上游的改动**
@@ -13,7 +13,6 @@
 | 机型 | 构建目标 | 安装资料 |
 | --- | --- | --- |
 | XR1710G（W1700K / W1701K） | `xr1710g` | [串口首次安装](docs/flashing-xr1710g.md) · [Full 固件](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed) |
-| XG2010G | `xg2010g` | [串口首次安装](docs/flashing-xg2010g.md) |
 
 ## 安装与升级
 
@@ -24,7 +23,9 @@
 | OpenWrt 正常运行且 SSH 可用 | 可用[在线槽位升级指南](docs/ssh-flash-chainloader.md)，先确认分区名、布局和回读。 |
 | 更新 OpenWrt 固件 | 保留配置走正在运行的 OpenWrt；需要重建系统时使用网页的 **firmware** 项。XR1710G AP 的首次迁移见[固件操作指南](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/docs/xr1710g-ap-operations.md)。 |
 
-[本仓 Releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases)提供本 fork 已发布的产物；用上游版本时，按[上游 Releases](https://github.com/naoki66/Gemtek-brightspeed-chainloader/releases)的版本和校验信息选择。刷写文件为对应机型与入口的 `*-slot.bin`。编译中间产物 `u-boot.bin`、`u-boot.img` 及裸 FIT 用于构建和封装。
+[本仓 Releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases)提供 XR1710G 槽位镜像及校验文件。根据发行说明选择匹配当前安装入口的 `*-slot.bin`，并用 `SHA256SUMS` 核对下载。编译中间产物 `u-boot.bin`、`u-boot.img` 及裸 FIT 用于构建和封装。
+
+正式版先将已验收的源码合入 `main`，再用北京时间的发布日期创建八位 `YYYYMMDD` 标签。发布标题采用 `XR1710G Secondary U-Boot YYYYMMDD`。用已验收的镜像发布时，发行说明记录镜像内嵌的实际构建提交和校验值。
 
 ## 日常维护与恢复
 
@@ -37,10 +38,10 @@
 
 ## 构建
 
-安装 AArch64 交叉编译工具链和常用 U-Boot 构建依赖。GitHub Actions 的[双机型构建文件](.github/workflows/build.yml)列出依赖并执行普通槽位检查。
+安装 AArch64 交叉编译工具链和常用 U-Boot 构建依赖。[XR1710G 构建流程](.github/workflows/build.yml)列出依赖并生成标准槽位。发布已有 CI 产物使用[独立手工流程](.github/workflows/publish-existing-artifact.yml)。
 
 ```sh
-target=xr1710g  # XG2010G 选 xg2010g
+target=xr1710g
 ./scripts/build.sh "$target"
 ./chainloader/build-chainloader-fit.sh "output/$target/u-boot.bin" out \
   "build/$target/tools/mkimage" "build/$target/tools/dumpimage" "$target"

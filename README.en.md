@@ -1,8 +1,8 @@
-# XR1710G / XG2010G second-stage U-Boot and web recovery
+# XR1710G second-stage U-Boot and web recovery
 
 **English** · [简体中文](README.md)
 
-This fork provides U-Boot 2026.07 second-stage boot and web recovery for the Brightspeed/Gemtek XR1710G (W1700K / W1701K) and XG2010G. It runs in the 1 MiB slot at NAND offset `0x600000` on the stock layout, keeping the factory first stage in place. The source is based on [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader).
+This fork maintains U-Boot 2026.07 second-stage boot and web recovery for the Brightspeed/Gemtek XR1710G (W1700K / W1701K). It runs in the 1 MiB slot at NAND offset `0x600000` on the stock layout, keeping the factory first stage in place. The source is based on [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader). This fork's CI and releases cover the XR1710G. For the XG2010G, use the upstream builds and documentation.
 
 > [!NOTE]
 > **Changes from naoki upstream**
@@ -13,7 +13,6 @@ This fork provides U-Boot 2026.07 second-stage boot and web recovery for the Bri
 | Model | Build target | Installation resources |
 | --- | --- | --- |
 | XR1710G (W1700K / W1701K) | `xr1710g` | [First installation via serial](docs/flashing-xr1710g.md) · [Full firmware](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.en.md) |
-| XG2010G | `xg2010g` | [First installation via serial](docs/flashing-xg2010g.md) |
 
 ## Installation and upgrades
 
@@ -24,7 +23,9 @@ This fork provides U-Boot 2026.07 second-stage boot and web recovery for the Bri
 | OpenWrt runs and SSH works | The [online slot update guide](docs/ssh-flash-chainloader.md) covers partition identification, layout and readback. |
 | Updating OpenWrt firmware | Use the running OpenWrt installation to keep settings. Use the web **firmware** target when rebuilding the system. See the [firmware operation guide](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/docs/xr1710g-ap-operations.en.md) for XR1710G AP migration. |
 
-Use [this fork's releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases) for published fork artifacts and [upstream releases](https://github.com/naoki66/Gemtek-brightspeed-chainloader/releases) for upstream builds. Verify the checksum and select the `*-slot.bin` for the model and upload method. The raw U-Boot binaries and bare FIT are packaging inputs.
+[This fork's releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases) provide XR1710G slot images and checksums. Use the release notes to choose the `*-slot.bin` that matches the installation method and verify it with `SHA256SUMS`. The raw U-Boot binaries and bare FIT are packaging inputs.
+
+For a stable release, merge the accepted source into `main` before tagging it. Use the eight-digit publication date in Asia/Shanghai for the `YYYYMMDD` tag and name the release `XR1710G Secondary U-Boot YYYYMMDD`. When publishing an already tested image, record its embedded build commit and checksum in the release notes.
 
 ## Operation and recovery
 
@@ -37,10 +38,10 @@ Use [this fork's releases](https://github.com/DictXiong/Gemtek-brightspeed-chain
 
 ## Build
 
-Install an AArch64 cross-compiler and U-Boot build dependencies. The [two-model GitHub Actions workflow](.github/workflows/build.yml) lists the dependencies and checks the standard slot images.
+Install an AArch64 cross-compiler and U-Boot build dependencies. The [XR1710G build workflow](.github/workflows/build.yml) lists the dependencies and produces the standard slot. An existing CI artifact can be published through the [manual publication workflow](.github/workflows/publish-existing-artifact.yml).
 
 ```sh
-target=xr1710g  # Use xg2010g for XG2010G.
+target=xr1710g
 ./scripts/build.sh "$target"
 ./chainloader/build-chainloader-fit.sh "output/$target/u-boot.bin" out \
   "build/$target/tools/mkimage" "build/$target/tools/dumpimage" "$target"
