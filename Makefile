@@ -372,7 +372,7 @@ include $(srctree)/scripts/Makefile.compiler
 
 # Read UBOOTRELEASE from include/config/uboot.release (if it exists)
 UBOOTRELEASE = $(shell cat include/config/uboot.release 2> /dev/null)
-UBOOTVERSION = $(if $(filter "airoha/w1701k",$(CONFIG_DEFAULT_DEVICE_TREE)),W1701K,XR1710G)
+UBOOTVERSION = XR1710G
 export VERSION PATCHLEVEL SUBLEVEL UBOOTRELEASE UBOOTVERSION
 
 # This tree never stamps the "-dirty" suffix into the version string.  The
@@ -2231,12 +2231,14 @@ endif
 
 # The setlocalversion script comes from linux and expects a
 # KERNELVERSION variable in the environment for figuring out which
-# annotated tags are relevant. Pass UBOOTVERSION.
+# annotated tags are relevant. Select the board name only for the image stamp.
+# Kconfig also reads UBOOTVERSION before auto.conf is available.
 #
 # UBOOT_SETLOCALVERSION_FLAGS carries --no-dirty by default: see the
 # explanation next to UBOOTVERSION above.
 define filechk_uboot.release
-	KERNELVERSION=$(UBOOTVERSION) LOCALVERSION="-$(shell date +%Y-%-m-%-d)" $(CONFIG_SHELL) $(srctree)/scripts/setlocalversion $(UBOOT_SETLOCALVERSION_FLAGS) $(srctree)
+	KERNELVERSION=$(if $(filter "airoha/w1701k",$(CONFIG_DEFAULT_DEVICE_TREE)),W1701K,$(UBOOTVERSION)) \
+	LOCALVERSION="-$(shell date +%Y-%-m-%-d)" $(CONFIG_SHELL) $(srctree)/scripts/setlocalversion $(UBOOT_SETLOCALVERSION_FLAGS) $(srctree)
 endef
 
 # Store (new) UBOOTRELEASE string in include/config/uboot.release
