@@ -6,13 +6,15 @@ UBOOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PREFIX_SHIM="$SCRIPT_DIR/chainloader-prefix-shim.uImage"
 SHIM="$SCRIPT_DIR/chainloader-shim.bin"
-# Each board ships its own control DTB and ITS template; pass the board name as
-# the 5th argument.  This repository is primarily XR1710G, so that is the
-# default (the XG2010G port already validated the same wrapper with its own
-# xg2010g-chainloader-control.dtb / .its.in).
+# The W1701K uses the XR1710G shim and memory layout. Its board DTB is
+# embedded inside the secondary U-Boot payload.
 BOARD="${5:-xr1710g}"
-DTB="$SCRIPT_DIR/$BOARD-chainloader-control.dtb"
-TEMPLATE="$SCRIPT_DIR/$BOARD-chainloader.its.in"
+WRAPPER="$BOARD"
+if [ "$BOARD" = w1701k ]; then
+    WRAPPER=xr1710g
+fi
+DTB="$SCRIPT_DIR/$WRAPPER-chainloader-control.dtb"
+TEMPLATE="$SCRIPT_DIR/$WRAPPER-chainloader.its.in"
 
 PAYLOAD="$(realpath "${1:-$UBOOT_DIR/u-boot.bin}")"
 OUTPUT_DIR="$(realpath -m "${2:-$UBOOT_DIR/out}")"
@@ -66,6 +68,8 @@ OUTPUT_PAYLOAD="$OUTPUT_DIR/${BOARD}-u-boot-${BUILD_STAMP}-g${COMMIT_ID}.bin"
 # never be uploaded through HTTP Recovery.
 LATEST_SLOT="$OUTPUT_DIR/$BOARD-chainloader-slot.bin"
 MAX_SLOT_SIZE=$((0x100000))
+# W1701K reserves the last 64 KiB for a separate EN8811H firmware image.
+W1701K_PHY_OFFSET=$((0xf0000))
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -89,6 +93,31 @@ prefix_size=$(wc -c < "$PREFIX_SHIM")
 cp "$PREFIX_SHIM" "$OUTPUT_SLOT"
 dd if=/dev/zero bs=1 count=$((0x2100 - prefix_size)) >> "$OUTPUT_SLOT" 2>/dev/null
 cat "$FIT" >> "$OUTPUT_SLOT"
+
+if [ "$BOARD" = w1701k ]; then
+  FW_DIR="${W1701K_PHY_FW_DIR:?Set W1701K_PHY_FW_DIR to the linux-firmware airoha directory}"
+  (
+    cd "$FW_DIR"
+    sha256sum -c >&2 <<'EOF'
+874982b88330112c376e484cdce114cf2e1476ccbb901c87f80882f127ffb90f  EthMD32.dm.bin
+3e4699ec709c836d5fce7c91bc5d205beb54aea326c4b70c7050b355784cbebd  EthMD32.DSP.bin
+EOF
+    cat EthMD32.dm.bin EthMD32.DSP.bin | gzip -n -9
+  ) > "$TMPDIR/en8811h.gz"
+  "$MKIMAGE" -A arm64 -O u-boot -T firmware -C gzip \
+    -n 'W1701K EN8811H MD32' -d "$TMPDIR/en8811h.gz" "$TMPDIR/en8811h.img"
+  fit_size=$(wc -c < "$OUTPUT_SLOT")
+  fw_size=$(wc -c < "$TMPDIR/en8811h.img")
+  if [ "$fit_size" -gt "$W1701K_PHY_OFFSET" ] ||
+     [ "$fw_size" -ge "$((MAX_SLOT_SIZE - W1701K_PHY_OFFSET))" ]; then
+    echo "Error: U-Boot ($fit_size bytes) or EN8811H firmware ($fw_size bytes) exceeds its slot space" >&2
+    exit 1
+  fi
+  dd if=/dev/zero bs=1 count="$((W1701K_PHY_OFFSET - fit_size))" 2>/dev/null |
+    tr '\000' '\377' >> "$OUTPUT_SLOT"
+  cat "$TMPDIR/en8811h.img" >> "$OUTPUT_SLOT"
+  cp "$FW_DIR/../LICENSES/LICENSE.airoha" "$OUTPUT_DIR/W1701K-EN8811H-LICENSE.txt"
+fi
 
 # The stable alias is kept for the flashing guide, which refers to the
 # unversioned name; the timestamped slot above is the artifact to publish.

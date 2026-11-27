@@ -7,8 +7,8 @@
 | | |
 |---|---|
 | 适用机型 / Boards | XR1710G / W1700K / W1701K |
-| 刷入文件 / File to flash | `xr1710g-chainloader-<版本>-slot.bin`（唯一需要刷入的文件 / the only file to flash） |
-| 下载 / Download | [Releases](https://github.com/naoki66/Gemtek-brightspeed-chainloader/releases) |
+| 刷入文件 / File to flash | XR1710G / W1700K 用 `xr1710g-chainloader-*-slot.bin`，W1701K 用 `w1701k-chainloader-*-slot.bin` |
+| 工件 / Artifacts | [本仓构建 / Fork builds](../.github/workflows/build.yml) · [XR1710G Releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases) |
 | 参考项目 / Reference | [Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader) |
 
 ## 刷机前必读 / Before you start
@@ -18,6 +18,12 @@
 
 - 刷机过程不要断电、不要拔网线。Do not power off or disconnect during flashing.
 - 确认固件文件与机型匹配（XR1710G 与 XG2010G 镜像不通用）。The XR1710G and XG2010G images are not interchangeable.
+
+## W1701K
+
+W1701K 使用 [`w1701k` 构建目标](../README.md#构建)。原厂 TFTP 使用右侧黄色网口，二级网页恢复在左右两个网口提供 DHCP 和 HTTP。进入恢复时请用隔离网线连接电脑。槽位位于 NAND `0x600000`，长 `0x100000` 字节，系统使用 UBI 2.0。已有 UBI 系统若已从该偏移读取并启动二级引导，只需更新槽位，可跳过 §3.5 的环境变量设置和 `saveenv`。
+
+Build the [`w1701k` target](../README.en.md#build). Use the right-hand yellow Ethernet port for vendor TFTP. Second-stage recovery offers DHCP and HTTP on both ports. Connect the computer over an isolated link when entering recovery. The UBI 2.0 layout uses a `0x100000`-byte slot at NAND offset `0x600000`. If the vendor boot command already reads and boots the chainloader from this offset, update the slot and skip the environment setup and `saveenv` in §3.5.
 
 ## 1. 准备工作 / Preparation
 
@@ -29,16 +35,16 @@
   *PC + serial terminal (115200 8N1)*
 - TFTP 服务器软件（Windows 用 TFTPD64，Linux/macOS 用 `tftp`）
   *TFTP server software*
-- 固件文件 `xr1710g-chainloader-<版本>-slot.bin`（放在 TFTP 服务器当前目录）
-  *Place `xr1710g-chainloader-<version>-slot.bin` in the TFTP server directory*
+- 对应机型的槽位文件（放在 TFTP 服务器当前目录）
+  *Place the slot file for your board in the TFTP server directory.*
 
-> Release 页面每个机型只有一个文件，文件名内嵌版本号与构建时间，例如
+> 槽位文件名包含版本号和构建时间，例如
 > `xr1710g-chainloader-20261016-040544-gc1a49ffc4d63-slot.bin`。下文命令为简洁一律写作
-> `xr1710g-chainloader-slot.bin`：请把下载到的文件**重命名**成该名，或把命令里的文件名换成实际下载的文件名。
-> *Each board has exactly one file on the Releases page, and its name carries the version and
-> build time, e.g. `xr1710g-chainloader-20261016-040544-gc1a49ffc4d63-slot.bin`. The commands below
-> use the short `xr1710g-chainloader-slot.bin` for brevity: rename the downloaded file, or
-> substitute the real filename in the commands.*
+> `xr1710g-chainloader-slot.bin`。请在执行命令时使用实际的文件名，W1701K 用 `w1701k-chainloader-*-slot.bin`。
+> *The slot filename carries the version and build time,
+> e.g. `xr1710g-chainloader-20261016-040544-gc1a49ffc4d63-slot.bin`. The commands below
+> use the short `xr1710g-chainloader-slot.bin` for brevity. Substitute the actual filename,
+> using `w1701k-chainloader-*-slot.bin` for the W1701K.*
 
 ## 2. TTL 连接 / TTL connection
 
@@ -64,13 +70,13 @@
 
 - 电脑网卡设静态 IP **192.168.0.10**，子网掩码 **255.255.255.0**。
   *Set the PC NIC to static IP 192.168.0.10 / 255.255.255.0.*
-- 网线连接路由器的 **10GbE 网口**。
-  *Connect the Ethernet cable to the router's 10GbE port.*
+- W1701K 接右侧黄色网口，XR1710G / W1700K 接 10GbE 网口。
+  *Use the right-hand yellow port on the W1701K or the 10GbE port on the XR1710G / W1700K.*
 
 ### 3.2 启动 TFTP 服务器 / Start the TFTP server
 
-- 确认 `xr1710g-chainloader-slot.bin` 在 TFTP 服务器当前目录下。
-  *Make sure `xr1710g-chainloader-slot.bin` is in the TFTP server's current directory.*
+- 确认对应机型的槽位文件在 TFTP 目录下。§3.5 按整槽写入，用于 TTL 的文件尾部须用 `0xff` 补齐到 1 MiB。
+  *Put the board's slot file in the TFTP directory. The TTL procedure in §3.5 writes the whole slot, so pad the file to 1 MiB with `0xff` bytes.*
 
 ### 3.3 上电打断 U-Boot / Interrupt U-Boot
 
@@ -92,8 +98,8 @@ setenv ipaddr 192.168.0.1
 tftpboot 0x81800000 xr1710g-chainloader-slot.bin
 ```
 
-> XR1710G 内存为 2 GiB，加载地址也可用 `0x89000000`；两机型教程统一使用 `0x81800000`。
-> The XR1710G has 2 GiB of RAM, so `0x89000000` also works; both guides use `0x81800000`.
+> 写入前确认传输长度为 `0x100000`，并核对 `crc32 0x81800000 0x100000` 与电脑端文件的 CRC32。
+> Before writing, confirm that TFTP transferred `0x100000` bytes and that `crc32 0x81800000 0x100000` matches the host file's CRC32.
 
 ### 3.5 写入 flash 并设置启动 / Write to flash and set bootcmd
 
@@ -144,7 +150,7 @@ reset
 
 | 文件 / File | 用途 / Purpose |
 |---|---|
-| `xr1710g-chainloader-<版本>-slot.bin` | 唯一用于刷机的镜像：通过 HTTP Recovery 的 `uboot` 目标写入 chainloader 分区（偏移 0x600000，1 MiB）。The only image to flash: write through the HTTP Recovery `uboot` target. |
+| `xr1710g-chainloader-<版本>-slot.bin` / `w1701k-chainloader-<版本>-slot.bin` | 通过 HTTP Recovery 的 `uboot` 目标写入对应机型的 chainloader 分区（偏移 0x600000，1 MiB）。Use the HTTP Recovery `uboot` target to write the slot file for your board. |
 
 > 构建过程只产出这一个文件。**不再提供** `.itb`：裸 FIT 不能通过 HTTP Recovery 上传，
 > 没有理由发布一个不该被使用的文件。
@@ -196,11 +202,11 @@ item in boot time. Change the length from `0x4000000` to `0x100000`, leaving the
 
 - **`T T T...` 后自动启动**：打断超时，重新上电并提前按键。
   *Missed the interrupt window — power-cycle and press earlier.*
-- **TFTP 超时**：检查电脑 IP（192.168.0.10）、TFTP 服务器已启动、文件名无误、网线插在 10GbE 口。
+- **TFTP 超时**：检查电脑 IP（192.168.0.10）、TFTP 服务器、文件名及 §3.1 的网口。
   *Check the PC IP, TFTP server status, filename and cable.*
-- **`Wrong Image Format`**：镜像文件不对，确认使用的是 `xr1710g-chainloader-*-slot.bin`
+- **`Wrong Image Format`**：检查是否为对应机型的 `*-slot.bin`
   （文件名带版本号与构建时间），而不是 `u-boot.bin` 或裸 `.itb`。
-  *Wrong image file — use `xr1710g-chainloader-*-slot.bin` (the name carries the version and build
+  *Use the board's `*-slot.bin` (the name carries the version and build
   time), not `u-boot.bin` or a bare `.itb`.*
 - **恢复页面打不开**：确认按住 reset 上电、电脑为 DHCP、访问 <http://192.168.0.1>。
   *Make sure recovery was entered, the PC uses DHCP, and the URL is http://192.168.0.1.*

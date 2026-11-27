@@ -103,7 +103,8 @@ static bool xr1710g_is_compatible(void)
 	return of_machine_is_compatible("econet,xr1710g") ||
 	       of_machine_is_compatible("econet,xr1710g-ubi") ||
 	       of_machine_is_compatible("gemtek,xr1710g") ||
-	       of_machine_is_compatible("gemtek,xr1710g-ubi");
+	       of_machine_is_compatible("gemtek,xr1710g-ubi") ||
+	       of_machine_is_compatible("gemtek,w1701k");
 }
 
 static void xr1710g_clrsetbits_le32(uintptr_t addr, u32 clear, u32 set)
@@ -775,6 +776,9 @@ static void xr1710g_fixup_fdt_macs(void *blob)
 
 	/* Keep the CPU/conduit port off the LAN and Wi-Fi derived offsets. */
 	xr1710g_mac_add(lan_mac, 4, cpu_mac);
+	/* GDM2 is the first LAN port on the W1701K. */
+	if (!fdt_node_check_compatible(blob, 0, "gemtek,w1701k-ubi"))
+		xr1710g_mac_add(lan_mac, 5, wan_mac);
 
 	for (i = 0; i < ARRAY_SIZE(xr1710g_fdt_cpu_mac_paths); i++) {
 		ret = xr1710g_fdt_set_mac(blob, xr1710g_fdt_cpu_mac_paths[i],

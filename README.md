@@ -1,18 +1,20 @@
-# XR1710G 二级 U-Boot 与网页恢复
+# XR1710G 与 W1701K 二级 U-Boot 和网页恢复
 
 **简体中文** · [English](README.en.md)
 
-本项目维护 Brightspeed/Gemtek XR1710G（W1700K / W1701K）的 U-Boot 2026.07 二级引导和网页恢复。它使用原厂 NAND 布局，在 `0x600000` 的 1 MiB 槽位运行，保留原厂一级引导。源码基于 [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader)。XG2010G 请使用上游资料与构建，本 fork 的 CI 和发布仅覆盖 XR1710G。
+本项目维护 Gemtek XR1710G、W1700K 和 W1701K 的 U-Boot 2026.07 二级引导和网页恢复。它使用原厂 NAND 布局，在 `0x600000` 的 1 MiB 槽位运行，保留原厂一级引导。源码基于 [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader)。XG2010G 请使用上游资料与构建。
 
 > [!NOTE]
 > **相对 naoki 上游的改动**
 >
+> - 新增 W1701K 的独立构建目标和槽位镜像。两个 EN8811H 网口均提供 DHCP 和网页恢复。
 > - 配套 XR1710G Full Legacy AP 支持[看门狗分级恢复和一次性 `reboot-to-uboot`](docs/xr1710g-boot-recovery.md)。网页重建会为配套镜像[预留状态卷](docs/xr1710g-boot-recovery.md#兼容性和状态卷)。
 > - XR1710G 更新了 [WAN 收发路径及特定 DMA 故障时的 LAN 恢复](docs/xr1710g-boot-recovery.md#网口与故障边界)，并提供[兼容槽位封装](docs/build-compatibility-slots.md)。
 
 | 机型 | 构建目标 | 安装资料 |
 | --- | --- | --- |
-| XR1710G（W1700K / W1701K） | `xr1710g` | [串口首次安装](docs/flashing-xr1710g.md) · [Full 固件](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed) |
+| XR1710G / W1700K | `xr1710g` | [串口首次安装](docs/flashing-xr1710g.md) · [Full 固件](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed) |
+| W1701K | `w1701k` | [串口安装](docs/flashing-xr1710g.md#w1701k) |
 
 ## 安装与升级
 
@@ -23,9 +25,11 @@
 | OpenWrt 正常运行且 SSH 可用 | 可用[在线槽位升级指南](docs/ssh-flash-chainloader.md)，先确认分区名、布局和回读。 |
 | 更新 OpenWrt 固件 | 保留配置走正在运行的 OpenWrt；需要重建系统时使用网页的 **firmware** 项。XR1710G AP 的首次迁移见[固件操作指南](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/docs/xr1710g-ap-operations.md)。 |
 
-[本仓 Releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases)提供 XR1710G 槽位镜像及校验文件。根据发行说明选择匹配当前安装入口的 `*-slot.bin`，并用 `SHA256SUMS` 核对下载。编译中间产物 `u-boot.bin`、`u-boot.img` 及裸 FIT 用于构建和封装。
+[本仓 Releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases)同时提供 XR1710G 和 W1701K 槽位镜像及校验文件。根据机型和安装入口选择 `*-slot.bin`，并用 `SHA256SUMS` 核对下载。编译中间产物 `u-boot.bin`、`u-boot.img` 及裸 FIT 用于构建和封装。
 
-正式版先将已验收的源码合入 `main`，再用北京时间的发布日期创建八位 `YYYYMMDD` 标签。发布标题采用 `XR1710G Secondary U-Boot YYYYMMDD`。用已验收的镜像发布时，发行说明记录镜像内嵌的实际构建提交和校验值。
+推荐与同机型的 [Full ImmortalWrt 固件](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed)配套使用。已有兼容固件可以继续使用，两个项目均可独立升级。
+
+正式版先将已验收的源码合入 `main`，再用北京时间的发布日期创建八位 `YYYYMMDD` 标签。发布标题采用 `XR1710G and W1701K Secondary U-Boot YYYYMMDD`。发行说明记录镜像内嵌的实际构建提交。
 
 ## 日常维护与恢复
 
@@ -38,7 +42,7 @@
 
 ## 构建
 
-安装 AArch64 交叉编译工具链和常用 U-Boot 构建依赖。[XR1710G 构建流程](.github/workflows/build.yml)列出依赖并生成标准槽位。发布已有 CI 产物使用[独立手工流程](.github/workflows/publish-existing-artifact.yml)。
+安装 AArch64 交叉编译工具链和常用 U-Boot 构建依赖。[构建流程](.github/workflows/build.yml)列出依赖并生成两种机型的标准槽位。[手工发布流程](.github/workflows/publish-existing-artifact.yml)核对同一次 CI 构建的两个槽位再发布。
 
 ```sh
 target=xr1710g
@@ -46,6 +50,8 @@ target=xr1710g
 ./chainloader/build-chainloader-fit.sh "output/$target/u-boot.bin" out \
   "build/$target/tools/mkimage" "build/$target/tools/dumpimage" "$target"
 ```
+
+打包 W1701K 时，将 `W1701K_PHY_FW_DIR` 指向 [linux-firmware 20261019](https://gitlab.com/kernel-firmware/linux-firmware/-/tree/20261019) 的 `airoha/` 目录。打包脚本会校验 EN8811H 的两个固件文件，把压缩后的 PHY 固件放在槽位末尾 64 KiB，并单独附上许可文件。
 
 普通槽位使用本仓的前缀、shim 和机型 DTB。需要匹配其他上传入口时，按[兼容槽位](docs/build-compatibility-slots.md)封装。源码和槽位校验通过后，仍要按需在对应机型、引导方式和网口上验收。
 

@@ -157,7 +157,7 @@ static int env_mtd_load(void)
 
 	ret = setup_mtd_device(&mtd_env);
 	if (ret)
-		goto out;
+		goto free_buffer;
 
 	sect_size = mtd_env->erasesize;
 
@@ -192,6 +192,7 @@ static int env_mtd_load(void)
 out:
 	put_mtd_device(mtd_env);
 
+free_buffer:
 	free(buf);
 
 	return ret;

@@ -325,6 +325,9 @@ int phy_restore_page(struct phy_device *phydev, int oldpage, int ret);
 
 int phy_startup(struct phy_device *phydev);
 int phy_config(struct phy_device *phydev);
+
+/* Configure an EN8811H with consecutive MD32 data and program images. */
+int airoha_en8811h_config(struct phy_device *phydev, const void *fw, size_t size);
 int phy_shutdown(struct phy_device *phydev);
 int phy_set_supported(struct phy_device *phydev, u32 max_speed);
 int phy_modify(struct phy_device *phydev, int devad, int regnum, u16 mask,

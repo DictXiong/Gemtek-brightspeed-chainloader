@@ -1,12 +1,12 @@
-name: Publish Existing XR1710G Artifact
+name: Publish Existing XR1710G and W1701K Artifacts
 
-run-name: Publish XR1710G run ${{ inputs.run_id }} as ${{ inputs.tag }}
+run-name: Publish U-Boot run ${{ inputs.run_id }} as ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: Successful XR1710G build on main
+        description: Successful XR1710G and W1701K build on main
         required: true
         type: string
       tag:
@@ -76,16 +76,16 @@ jobs:
           test "$MAIN_ANCESTOR" = "$SOURCE_SHA"
           echo "commit=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Download the XR1710G build
+      - name: Download both model builds
         uses: actions/download-artifact@v8
         with:
-          name: uboot-xr1710g
-          path: release-output
+          pattern: uboot-*
+          path: build-output
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.run_id }}
 
-      - name: Verify the slot and publish a new release
+      - name: Verify the two slots and publish one release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -98,33 +98,48 @@ jobs:
             echo "The publication date changed during this run." >&2
             exit 1
           fi
+          mkdir release-output
+          for board in xr1710g w1701k; do
+            (
+              cd "build-output/uboot-$board"
+              info="$board-build-info.txt"
+              test "$(sed -n 's/^Build target: //p' "$info")" = "$board"
+              test "$(sed -n 's/^Commit: //p' "$info")" = "$SOURCE_SHA"
+              stamp=$(sed -n 's/^Build stamp (UTC): //p' "$info")
+              [[ "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]
+              slot="$board-chainloader-${stamp}-g${SOURCE_SHA:0:12}-slot.bin"
+              test "$(sed -n 's/^Flash slot image: //p' "$info")" = "$slot"
+              size=$(wc -c < "$slot")
+              test "$size" -gt $((0x2104))
+              test "$size" -lt $((0x100000))
+              test "$(od -An -tx1 -N4 "$slot" | tr -d ' \n')" = 27051956
+              test "$(od -An -tx1 -j $((0x2100)) -N4 "$slot" | tr -d ' \n')" = d00dfeed
+              files=("$slot")
+              if [ "$board" = w1701k ]; then
+                test "$(od -An -tx1 -j $((0xf0000)) -N4 "$slot" | tr -d ' \n')" = 27051956
+                test -s W1701K-EN8811H-LICENSE.txt
+                files+=(W1701K-EN8811H-LICENSE.txt)
+              fi
+              sha256sum "${files[@]}" | cmp - "$board-sha256sums.txt"
+              cp "${files[@]}" "$info" ../../release-output/
+            )
+          done
           cd release-output
-          INFO=xr1710g-build-info.txt
-          test "$(sed -n 's/^Build target: //p' "$INFO")" = xr1710g
-          test "$(sed -n 's/^Commit: //p' "$INFO")" = "$SOURCE_SHA"
-          STAMP=$(sed -n 's/^Build stamp (UTC): //p' "$INFO")
-          [[ "$STAMP" =~ ^[0-9]{8}-[0-9]{6}$ ]]
-          SLOT="xr1710g-chainloader-${STAMP}-g${SOURCE_SHA:0:12}-slot.bin"
-          test "$(sed -n 's/^Flash slot image: //p' "$INFO")" = "$SLOT"
-          SIZE=$(wc -c < "$SLOT")
-          test "$SIZE" -gt $((0x2104))
-          test "$SIZE" -lt $((0x100000))
-          test "$(od -An -tx1 -N4 "$SLOT" | tr -d ' \n')" = 27051956
-          test "$(od -An -tx1 -j $((0x2100)) -N4 "$SLOT" | tr -d ' \n')" = d00dfeed
-          sha256sum "$SLOT" > SHA256SUMS
-          cmp SHA256SUMS xr1710g-sha256sums.txt
+          sha256sum * > SHA256SUMS
 
           NOTES_FILE=$(mktemp)
           trap 'rm -f "$NOTES_FILE"' EXIT
           {
             # Backticks are literal Markdown in the release text.
             # shellcheck disable=SC2016
-            printf 'XR1710G standard slot built from [`%s`](%s/%s/commit/%s) in [Actions run %s](%s/%s/actions/runs/%s).\n\n' \
+            printf 'XR1710G and W1701K standard slots built from [`%s`](%s/%s/commit/%s) in [Actions run %s](%s/%s/actions/runs/%s).\n\n' \
               "${SOURCE_SHA:0:12}" "$GITHUB_SERVER_URL" "$GH_REPO" "$SOURCE_SHA" \
               "$RUN_ID" "$GITHUB_SERVER_URL" "$GH_REPO" "$RUN_ID"
             # shellcheck disable=SC2016
-            printf 'Use this slot with an [installation method that accepts the standard slot](%s/%s/blob/%s/docs/recovery-web.md), and verify it with `SHA256SUMS`. Check [compatible slot formats](%s/%s/blob/%s/docs/build-compatibility-slots.md) for other uploaders.\n' \
+            printf 'Choose the slot for your device and an [installation method that accepts it](%s/%s/blob/%s/docs/recovery-web.md). Verify with `SHA256SUMS` and check [compatible slot formats](%s/%s/blob/%s/docs/build-compatibility-slots.md) for other uploaders.\n\n' \
               "$GITHUB_SERVER_URL" "$GH_REPO" "$RELEASE_TAG" "$GITHUB_SERVER_URL" "$GH_REPO" "$RELEASE_TAG"
+            printf '%s\n' 'W1701K provides DHCP and web recovery on both Ethernet ports. Its slot includes EN8811H PHY firmware and ships with the Airoha license.'
+            printf '\n%s\n' 'For new installations, we recommend the matching [Full ImmortalWrt firmware](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/releases). Existing compatible firmware may be used independently.'
           } > "$NOTES_FILE"
 
           case "$RELEASE_TYPE" in
@@ -132,6 +147,6 @@ jobs:
             release) FLAGS=(--latest) ;;
             *) exit 1 ;;
           esac
-          gh release create "$RELEASE_TAG" "$SLOT" SHA256SUMS \
-            --verify-tag --title "XR1710G Secondary U-Boot $RELEASE_TAG" \
+          gh release create "$RELEASE_TAG" ./* \
+            --verify-tag --title "XR1710G and W1701K Secondary U-Boot $RELEASE_TAG" \
             --notes-file "$NOTES_FILE" "${FLAGS[@]}"

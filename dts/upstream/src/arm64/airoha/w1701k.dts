@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+
+#include "xr1710g.dts"
+
+/ {
+	model = "Gemtek W1701K";
+	compatible = "gemtek,w1701k", "airoha,an7581", "airoha,en7581";
+	recovery-green-led-gpios = <&en7581_pinctrl 17 GPIO_ACTIVE_LOW>;
+	recovery-yellow-led-gpios = <&en7581_pinctrl 20 GPIO_ACTIVE_LOW>;
+};
+
+&{/leds} {
+	/delete-node/ led-lan1-green;
+	/delete-node/ led-lan1-yellow;
+	/delete-node/ led-lan2-green;
+};
+
+&eth {
+	/* The vendor first stage configures the GDM4 port and its EN8811H PHY. */
+	airoha,recovery-gdm4-2500base-x;
+};

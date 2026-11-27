@@ -7,7 +7,7 @@
 # chainloader, so only the U-Boot image is produced here.
 #
 # Usage:
-#   ./scripts/build.sh <xr1710g|xg2010g> [extra-make-args...]
+#   ./scripts/build.sh <xr1710g|w1701k|xg2010g> [extra-make-args...]
 #
 # Required environment:
 #   CROSS_COMPILE   AArch64 toolchain prefix (default: aarch64-linux-gnu-)
@@ -25,18 +25,15 @@ board="${1:-}"
 shift || true
 
 case "$board" in
-xr1710g)
-	defconfig=xr1710g_defconfig
-	;;
-xg2010g)
-	defconfig=xg2010g_defconfig
+xr1710g|w1701k|xg2010g)
+	defconfig=${board}_defconfig
 	;;
 "")
-	echo "usage: $0 <xr1710g|xg2010g> [extra-make-args...]" >&2
+	echo "usage: $0 <xr1710g|w1701k|xg2010g> [extra-make-args...]" >&2
 	exit 2
 	;;
 *)
-	echo "error: unknown board '$board' (expected xr1710g or xg2010g)" >&2
+	echo "error: unknown board '$board' (expected xr1710g, w1701k or xg2010g)" >&2
 	exit 2
 	;;
 esac

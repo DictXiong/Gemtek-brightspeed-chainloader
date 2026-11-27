@@ -521,21 +521,11 @@ static int en8811h_read_fw(void **fw, size_t *fwsize, struct en8811h_priv *priv)
 	return 0;
 }
 
-static int en8811h_load_firmware(struct phy_device *phydev)
+static int en8811h_program_firmware(struct phy_device *phydev,
+				   const unsigned char *buffer, size_t fw_size)
 {
 	struct en8811h_priv *priv = phydev->priv;
-	size_t fw_size;
-	void *buffer;
 	int ret;
-
-	priv->script_name = SCRIPT_NAME(en8811h);
-	priv->mem_size = EN8811H_MD32_DM_SIZE + EN8811H_MD32_DSP_SIZE;
-
-	ret = en8811h_read_fw(&buffer, &fw_size, priv);
-	if (ret < 0) {
-		dev_err(phydev->dev, "Failed to get firmware data\n");
-		return -EINVAL;
-	}
 
 	if (fw_size != EN8811H_MD32_DM_SIZE + EN8811H_MD32_DSP_SIZE) {
 		dev_err(phydev->dev,
@@ -556,13 +546,12 @@ static int en8811h_load_firmware(struct phy_device *phydev)
 	if (ret < 0)
 		goto en8811h_load_firmware_out;
 
-	ret = air_write_buf(phydev, AIR_FW_ADDR_DM, EN8811H_MD32_DM_SIZE,
-			    (unsigned char *)buffer);
+	ret = air_write_buf(phydev, AIR_FW_ADDR_DM, EN8811H_MD32_DM_SIZE, buffer);
 	if (ret < 0)
 		goto en8811h_load_firmware_out;
 
 	ret = air_write_buf(phydev, AIR_FW_ADDR_DSP, EN8811H_MD32_DSP_SIZE,
-			    (unsigned char *)buffer + EN8811H_MD32_DM_SIZE);
+			    buffer + EN8811H_MD32_DM_SIZE);
 	if (ret < 0)
 		goto en8811h_load_firmware_out;
 
@@ -587,10 +576,30 @@ static int en8811h_load_firmware(struct phy_device *phydev)
 		 priv->firmware_version);
 
 en8811h_load_firmware_out:
-	free(buffer);
 	if (ret < 0)
 		dev_err(phydev->dev, "Firmware loading failed: %d\n", ret);
 
+	return ret;
+}
+
+static int en8811h_load_firmware(struct phy_device *phydev)
+{
+	struct en8811h_priv *priv = phydev->priv;
+	size_t fw_size;
+	void *buffer;
+	int ret;
+
+	priv->script_name = SCRIPT_NAME(en8811h);
+	priv->mem_size = EN8811H_MD32_DM_SIZE + EN8811H_MD32_DSP_SIZE;
+
+	ret = en8811h_read_fw(&buffer, &fw_size, priv);
+	if (ret < 0) {
+		dev_err(phydev->dev, "Failed to get firmware data\n");
+		return -EINVAL;
+	}
+
+	ret = en8811h_program_firmware(phydev, buffer, fw_size);
+	free(buffer);
 	return ret;
 }
 
@@ -927,18 +936,23 @@ static int en8811h_config_serdes_polarity(struct phy_device *phydev)
 					   pbus_value);
 }
 
-static int en8811h_config(struct phy_device *phydev)
+int airoha_en8811h_config(struct phy_device *phydev, const void *fw, size_t size)
 {
-	struct en8811h_priv *priv = phydev->priv;
+	struct en8811h_priv *priv;
 	int ret = 0;
 
+	if ((phydev->phy_id & 0x0ffffff0) != (EN8811H_PHY_ID & 0x0ffffff0))
+		return -ENODEV;
+
+	priv = phydev->priv;
 	/* If restart happened in .probe(), no need to restart now */
 	if (priv->mcu_needs_restart) {
 		ret = en8811h_restart_mcu(phydev);
 		if (ret < 0)
 			return ret;
 	} else {
-		ret = en8811h_load_firmware(phydev);
+		ret = fw ? en8811h_program_firmware(phydev, fw, size) :
+			   en8811h_load_firmware(phydev);
 		if (ret) {
 			dev_err(phydev->dev, "Load firmware fail.\n");
 			return ret;
@@ -973,6 +987,11 @@ static int en8811h_config(struct phy_device *phydev)
 	}
 
 	return 0;
+}
+
+static int en8811h_config(struct phy_device *phydev)
+{
+	return airoha_en8811h_config(phydev, NULL, 0);
 }
 
 static int an8811hb_config(struct phy_device *phydev)

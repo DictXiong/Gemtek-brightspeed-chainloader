@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+#include "xr1710g-u-boot.dtsi"
+
+&{/mdio-bus} {
+	/delete-node/ ethernet-phy@5;
+	/delete-node/ ethernet-phy@8;
+};
+
+&switch {
+	mdio {
+		ethernet-phy@f {
+			reg = <15>;
+			reset-gpios = <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <10000>;
+			reset-deassert-us = <20000>;
+		};
+	};
+};

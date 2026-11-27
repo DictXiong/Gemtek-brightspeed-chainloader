@@ -1,18 +1,20 @@
-# XR1710G second-stage U-Boot and web recovery
+# XR1710G and W1701K second-stage U-Boot and web recovery
 
 **English** · [简体中文](README.md)
 
-This fork maintains U-Boot 2026.07 second-stage boot and web recovery for the Brightspeed/Gemtek XR1710G (W1700K / W1701K). It runs in the 1 MiB slot at NAND offset `0x600000` on the stock layout, keeping the factory first stage in place. The source is based on [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader). This fork's CI and releases cover the XR1710G. For the XG2010G, use the upstream builds and documentation.
+This fork maintains U-Boot 2026.07 second-stage boot and web recovery for the Gemtek XR1710G, W1700K and W1701K. It runs in the 1 MiB slot at NAND offset `0x600000` on the stock layout, keeping the factory first stage in place. The source is based on [naoki66/Gemtek-brightspeed-chainloader](https://github.com/naoki66/Gemtek-brightspeed-chainloader). For the XG2010G, use the upstream builds and documentation.
 
 > [!NOTE]
 > **Changes from naoki upstream**
 >
+> - Adds a dedicated W1701K build and slot image with DHCP and web recovery on both EN8811H Ethernet ports.
 > - Paired XR1710G Full Legacy AP images support [watchdog-backed recovery and one-shot `reboot-to-uboot`](docs/xr1710g-boot-recovery.en.md). A web rebuild [reserves the state volume](docs/xr1710g-boot-recovery.en.md#compatibility-and-state-volume) for those images.
 > - The fork updates the [XR1710G WAN packet path and LAN recovery for a specific DMA failure](docs/xr1710g-boot-recovery.en.md#ethernet-and-failure-boundaries), and provides [compatibility slot packaging](docs/build-compatibility-slots.md#english).
 
 | Model | Build target | Installation resources |
 | --- | --- | --- |
-| XR1710G (W1700K / W1701K) | `xr1710g` | [First installation via serial](docs/flashing-xr1710g.md) · [Full firmware](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.en.md) |
+| XR1710G / W1700K | `xr1710g` | [First installation via serial](docs/flashing-xr1710g.md) · [Full firmware](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.en.md) |
+| W1701K | `w1701k` | [Serial installation](docs/flashing-xr1710g.md#w1701k) |
 
 ## Installation and upgrades
 
@@ -23,9 +25,11 @@ This fork maintains U-Boot 2026.07 second-stage boot and web recovery for the Br
 | OpenWrt runs and SSH works | The [online slot update guide](docs/ssh-flash-chainloader.md) covers partition identification, layout and readback. |
 | Updating OpenWrt firmware | Use the running OpenWrt installation to keep settings. Use the web **firmware** target when rebuilding the system. See the [firmware operation guide](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/docs/xr1710g-ap-operations.en.md) for XR1710G AP migration. |
 
-[This fork's releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases) provide XR1710G slot images and checksums. Use the release notes to choose the `*-slot.bin` that matches the installation method and verify it with `SHA256SUMS`. The raw U-Boot binaries and bare FIT are packaging inputs.
+[This fork's releases](https://github.com/DictXiong/Gemtek-brightspeed-chainloader/releases) include XR1710G and W1701K slot images and checksums. Choose the `*-slot.bin` that matches the device and installation method, and verify it with `SHA256SUMS`. The raw U-Boot binaries and bare FIT are packaging inputs.
 
-For a stable release, merge the accepted source into `main` before tagging it. Use the eight-digit publication date in Asia/Shanghai for the `YYYYMMDD` tag and name the release `XR1710G Secondary U-Boot YYYYMMDD`. When publishing an already tested image, record its embedded build commit and checksum in the release notes.
+We recommend pairing the slot with the matching [Full ImmortalWrt firmware](https://github.com/DictXiong/ImmortalWrt-for-Gemtek-brightspeed/blob/master/README.en.md). Existing compatible firmware can still be used, and both projects can be upgraded independently.
+
+For a stable release, merge the accepted source into `main` before tagging it. Use the eight-digit publication date in Asia/Shanghai for the `YYYYMMDD` tag and name the release `XR1710G and W1701K Secondary U-Boot YYYYMMDD`. Record the embedded build commit in the release notes.
 
 ## Operation and recovery
 
@@ -38,7 +42,7 @@ For a stable release, merge the accepted source into `main` before tagging it. U
 
 ## Build
 
-Install an AArch64 cross-compiler and U-Boot build dependencies. The [XR1710G build workflow](.github/workflows/build.yml) lists the dependencies and produces the standard slot. An existing CI artifact can be published through the [manual publication workflow](.github/workflows/publish-existing-artifact.yml).
+Install an AArch64 cross-compiler and U-Boot build dependencies. The [build workflow](.github/workflows/build.yml) lists the dependencies and produces the standard slots for both devices. The [manual publication workflow](.github/workflows/publish-existing-artifact.yml) verifies both slots from one CI run before publication.
 
 ```sh
 target=xr1710g
@@ -46,6 +50,8 @@ target=xr1710g
 ./chainloader/build-chainloader-fit.sh "output/$target/u-boot.bin" out \
   "build/$target/tools/mkimage" "build/$target/tools/dumpimage" "$target"
 ```
+
+When packaging the W1701K slot, set `W1701K_PHY_FW_DIR` to the `airoha/` directory from [linux-firmware 20261019](https://gitlab.com/kernel-firmware/linux-firmware/-/tree/20261019). The packer verifies the two EN8811H firmware files, places the compressed PHY firmware in the final 64 KiB of the slot, and includes the license as a separate file.
 
 The standard slot uses the prefix, shim and model DTB in this repository. To target a different recovery interface, use the matching [compatibility slot](docs/build-compatibility-slots.md). Build and packaging checks are separate from verification on the target board and Ethernet ports.
 

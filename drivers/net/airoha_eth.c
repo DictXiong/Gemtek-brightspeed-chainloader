@@ -14,9 +14,13 @@
 #include <dm.h>
 #include <dm/devres.h>
 #include <dm/lists.h>
+#include <gzip.h>
+#include <image.h>
 #include <mapmem.h>
 #include <malloc.h>
+#include <mtd.h>
 #include <net.h>
+#include <phy.h>
 #include <regmap.h>
 #include <reset.h>
 #include <syscon.h>
@@ -59,13 +63,16 @@
 #define SCU_SHARE_FEMEM_SEL 0x958
 #define SCU_WAN_CONF 0x70
 #define SCU_WAN_SEL GENMASK(7, 0)
+#define SCU_WAN_SEL_HSGMII FIELD_PREP(SCU_WAN_SEL, 0x11)
 #define SCU_WAN_SEL_USXGMII FIELD_PREP(SCU_WAN_SEL, 0x12)
 #define SCU_SSR3 0x94
 #define SCU_ETH_XSI_SEL GENMASK(14, 13)
 #define SCU_ETH_XSI_USXGMII FIELD_PREP(SCU_ETH_XSI_SEL, 0x1)
+#define SCU_ETH_XSI_HSGMII FIELD_PREP(SCU_ETH_XSI_SEL, 0x2)
 #define SCU_SSTR 0x9c
 #define SCU_PON_XSI_SEL GENMASK(10, 9)
 #define SCU_PON_XSI_USXGMII FIELD_PREP(SCU_PON_XSI_SEL, 0x1)
+#define SCU_PON_XSI_HSGMII FIELD_PREP(SCU_PON_XSI_SEL, 0x2)
 #define SCU_GPIO_2ND_I2C_MODE 0x214
 #define SCU_GPIO_MDC_IO_MASTER_MODE BIT(14)
 #define SCU_GPIO_I2C_MASTER_MODE BIT(13)
@@ -98,6 +105,8 @@
 
 /* ETH PCS (XR1710G gdm4 / lan2) */
 #define ETH_PCS_XFI_MAC_BASE 0x1fa09000
+#define ETH_PCS_HSGMII_AN_BASE 0x1fa70000
+#define ETH_PCS_HSGMII_BASE 0x1fa70a00
 #define ETH_PCS_MULTI_SGMII_BASE 0x1fa74000
 #define ETH_PCS_USXGMII_BASE 0x1fa75900
 #define ETH_PCS_HSGMII_RATE_ADP_BASE 0x1fa76000
@@ -110,11 +119,19 @@
  * Addresses match the "pon_pcs" node of the vendor device tree.
  */
 #define WAN_PCS_XFI_MAC_BASE 0x1fa08000
+#define WAN_PCS_HSGMII_AN_BASE 0x1fa80000
+#define WAN_PCS_HSGMII_BASE 0x1fa80a00
 #define WAN_PCS_MULTI_SGMII_BASE 0x1fa84000
 #define WAN_PCS_USXGMII_BASE 0x1fa85900
 #define WAN_PCS_HSGMII_RATE_ADP_BASE 0x1fa86000
 #define WAN_PCS_XFI_ANA_BASE 0x1fa8a000
 #define WAN_PCS_XFI_PMA_BASE 0x1fa8b000
+
+#define W1701K_LEFT_PHY_ADDR 15
+/* Keep in sync with chainloader/build-chainloader-fit.sh. */
+#define W1701K_PHY_FIRMWARE_OFFSET 0xf0000
+#define W1701K_PHY_FIRMWARE_LIMIT 0x10000
+#define W1701K_PHY_FIRMWARE_SIZE (0x4000 + 0x20000)
 
 #define PCS_XFI_GIB_CFG 0x0000
 #define PCS_XFI_RX_FRAG_LEN GENMASK(26, 22)
@@ -137,6 +154,19 @@
 
 #define PCS_MULTI_SGMII_MSG_RX_CTRL_0 0x0100
 #define PCS_HSGMII_XFI_SEL BIT(28)
+#define PCS_MULTI_SGMII_STS_CTRL_0 0x18
+#define PCS_LINK_MODE_P0 GENMASK(5, 4)
+#define PCS_LINK_MODE_P0_2500 FIELD_PREP(PCS_LINK_MODE_P0, 3)
+#define PCS_FORCE_SPEED_P0 BIT(2)
+#define PCS_FORCE_LINK_P0 GENMASK(1, 0)
+#define PCS_HSGMII_AN_CTRL 0x0
+#define PCS_HSGMII_AN_ENABLE BIT(12)
+#define PCS_HSGMII_CTRL_1 0x0
+#define PCS_HSGMII_TBI_10B_MODE BIT(30)
+#define PCS_HSGMII_CTRL_6 0x14
+#define PCS_HSGMII_TX_ENABLE BIT(4)
+#define PCS_HSGMII_RATE_ADP_P0_CTRL_0 0x100
+#define PCS_HSGMII_DISABLE_MII_MODE BIT(31)
 
 #define PCS_USXGMII_PCS_CTROL_1 0x0000
 #define PCS_USXGMII_SPEED_SEL_H BIT(13)
@@ -708,6 +738,8 @@ struct airoha_peer_fport {
  */
 struct airoha_ext_pcs {
 	void __iomem *xfi_mac;
+	void __iomem *hsgmii_an;
+	void __iomem *hsgmii;
 	void __iomem *multi_sgmii;
 	void __iomem *usxgmii;
 	void __iomem *rate_adp;
@@ -730,6 +762,7 @@ struct airoha_eth {
 	/* External-MAC PCS instances: lan2 (GDM4/PHY5) and wan (GDM2/PHY8). */
 	struct airoha_ext_pcs pcs;
 	struct airoha_ext_pcs wan_pcs;
+	bool gdm4_hsgmii;
 
 	struct regmap *scu_regmap;
 	struct regmap *chip_scu_regmap;
@@ -1284,8 +1317,10 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 {
 	void __iomem *ana = pcs->ana;
 	void __iomem *pma = pcs->pma;
+	bool hsgmii = eth->gdm4_hsgmii && pcs == &eth->wan_pcs;
 	bool tune_wan = IS_ENABLED(CONFIG_BOARD_XR1710G) &&
-			pcs == &eth->wan_pcs && airoha_recovery_wan_service_enabled(eth);
+			pcs == &eth->wan_pcs &&
+			(hsgmii || airoha_recovery_wan_service_enabled(eth));
 
 	if (!ana || !pma)
 		return;
@@ -1296,7 +1331,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 	/* Enable analog common lane. */
 	airoha_rmw(ana, 0x0, 0, BIT(0));
 
-	/* JCPLL bring-up for 10.3125G USXGMII. */
+	/* JCPLL, using the AN7581 2500BASE-X reference on the W1701K PON PCS. */
 	udelay(300);
 	airoha_rmw(ana, 0x48, GENMASK(15, 8),
 		   FIELD_PREP(GENMASK(15, 8), BIT(5)));
@@ -1345,7 +1380,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 		   FIELD_PREP(GENMASK(26, 24), 0x2) |
 			   FIELD_PREP(GENMASK(23, 16), 0xe4));
 	airoha_rmw(ana, 0x48, GENMASK(20, 16),
-		   FIELD_PREP(GENMASK(20, 16), 0xf));
+		   FIELD_PREP(GENMASK(20, 16), hsgmii ? 0x10 : 0xf));
 	airoha_rmw(ana, 0x24, GENMASK(28, 24) | GENMASK(18, 16) | BIT(8),
 		   FIELD_PREP(GENMASK(28, 24), 0x5) |
 			   FIELD_PREP(GENMASK(18, 16), 0x1) | BIT(8));
@@ -1356,7 +1391,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 
 	udelay(300);
 
-	/* TXPLL bring-up for 10G. */
+	/* TXPLL. The HSGMII line rate is 3.125 GBd. */
 	airoha_rmw(ana, 0x84, GENMASK(25, 24) | GENMASK(17, 16),
 		   FIELD_PREP(GENMASK(25, 24), 0x1) |
 			   FIELD_PREP(GENMASK(17, 16), 0x1));
@@ -1368,7 +1403,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 		   GENMASK(25, 24) | BIT(16) | GENMASK(9, 8) | BIT(0),
 		   FIELD_PREP(GENMASK(25, 24), 0x0));
 	airoha_rmw(ana, 0x6c, BIT(16) | BIT(8) | GENMASK(1, 0),
-		   BIT(16) | FIELD_PREP(GENMASK(1, 0), 0x3));
+		   (hsgmii ? 0 : BIT(16)) | FIELD_PREP(GENMASK(1, 0), 0x3));
 	airoha_rmw(ana, 0x80, GENMASK(31, 16) | GENMASK(15, 0), 0);
 	airoha_rmw(ana, 0x7c, BIT(16) | BIT(8) | BIT(0), 0);
 	airoha_rmw(ana, 0x84, GENMASK(15, 0), 0);
@@ -1378,15 +1413,14 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 		   FIELD_PREP(GENMASK(28, 24), 0x1f) |
 			   FIELD_PREP(GENMASK(20, 16), 0x5) |
 			   FIELD_PREP(GENMASK(13, 8), 0x0) |
-			   FIELD_PREP(GENMASK(5, 0), 0xf));
+			   FIELD_PREP(GENMASK(5, 0), hsgmii ? 0xa : 0xf));
 	airoha_rmw(ana, 0x54,
 		   BIT(24) | GENMASK(20, 16) | GENMASK(12, 8) | GENMASK(4, 0),
-		   FIELD_PREP(GENMASK(20, 16), BIT(4) | BIT(3)) |
-			   FIELD_PREP(GENMASK(12, 8),
-				      BIT(3) | BIT(1) | BIT(0)) |
-			   FIELD_PREP(GENMASK(4, 0), BIT(1)));
+		   FIELD_PREP(GENMASK(20, 16), hsgmii ? 0 : 0x18) |
+			   FIELD_PREP(GENMASK(12, 8), hsgmii ? 0 : 0xb) |
+			   FIELD_PREP(GENMASK(4, 0), hsgmii ? 0x5 : 0x2));
 	airoha_rmw(ana, 0x74, GENMASK(25, 24),
-		   FIELD_PREP(GENMASK(25, 24), BIT(0)));
+		   FIELD_PREP(GENMASK(25, 24), hsgmii ? 0 : 1));
 	airoha_rmw(ana, 0x78,
 		   GENMASK(29, 27) | GENMASK(26, 24) | GENMASK(18, 16) |
 			   GENMASK(10, 8) | BIT(0),
@@ -1395,7 +1429,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 			   FIELD_PREP(GENMASK(18, 16), 0x4) |
 			   FIELD_PREP(GENMASK(10, 8), 0x7) | BIT(0));
 	airoha_rmw(pma, 0x798, GENMASK(30, 0),
-		   FIELD_PREP(GENMASK(30, 0), BIT(27) | BIT(22)));
+		   BIT(27) | (hsgmii ? BIT(25) : BIT(22)));
 	airoha_rmw(pma, 0x794, 0, BIT(24));
 	airoha_rmw(ana, 0x58,
 		   GENMASK(25, 24) | GENMASK(17, 16) | GENMASK(10, 8) |
@@ -1407,10 +1441,10 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 	airoha_rmw(ana, 0x5c, GENMASK(1, 0), FIELD_PREP(GENMASK(1, 0), 0x1));
 	airoha_rmw(ana, 0x54, BIT(24), 0);
 	airoha_rmw(ana, 0x5c, GENMASK(17, 16) | BIT(8), 0);
-	airoha_rmw(ana, 0x74, GENMASK(17, 16), 0);
+	airoha_rmw(ana, 0x74, GENMASK(17, 16), hsgmii ? BIT(16) : 0);
 	airoha_rmw(ana, 0x94, GENMASK(4, 0), FIELD_PREP(GENMASK(4, 0), 0xf));
 	airoha_rmw(ana, 0x70, GENMASK(12, 8) | GENMASK(2, 0),
-		   FIELD_PREP(GENMASK(12, 8), BIT(3) | BIT(1) | BIT(0)) |
+		   FIELD_PREP(GENMASK(12, 8), hsgmii ? 0xd : 0xb) |
 			   FIELD_PREP(GENMASK(2, 0), 0x3));
 	airoha_rmw(ana, 0x74, GENMASK(10, 8) | BIT(0), BIT(0));
 	airoha_rmw(ana, 0x6c, 0, BIT(24));
@@ -1418,31 +1452,35 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 	airoha_rmw(pma, 0x854, 0, BIT(8) | BIT(0));
 
 	udelay(300);
+	if (hsgmii)
+		mdelay(100);
 
 	/* TX path setup. */
 	airoha_rmw(pma, 0x580, GENMASK(1, 0),
-		   FIELD_PREP(GENMASK(1, 0), BIT(1)));
+		   FIELD_PREP(GENMASK(1, 0), hsgmii ? 1 : 2));
 	airoha_rmw(ana, 0xc4, 0, BIT(24) | BIT(0));
 	udelay(1);
 	airoha_rmw(pma, 0x874, 0, BIT(24) | BIT(16));
 	airoha_rmw(pma, 0x77c,
 		   BIT(24) | GENMASK(19, 16) | BIT(8) | GENMASK(2, 0),
-		   BIT(24) | FIELD_PREP(GENMASK(19, 16), BIT(2) | BIT(0)) |
+		   BIT(24) | FIELD_PREP(GENMASK(19, 16), hsgmii ? 4 : 5) |
 			   FIELD_PREP(GENMASK(2, 0), 0x0));
 	airoha_rmw(pma, 0x784, BIT(8) | GENMASK(1, 0),
-		   BIT(8) | FIELD_PREP(GENMASK(1, 0), BIT(1)));
+		   BIT(8) | FIELD_PREP(GENMASK(1, 0), hsgmii ? 1 : 2));
 	airoha_rmw(pma, 0x778,
 		   BIT(24) | GENMASK(20, 16) | BIT(8) | GENMASK(5, 0),
-		   BIT(24) | FIELD_PREP(GENMASK(20, 16), 0x1) | BIT(8) |
-			   FIELD_PREP(GENMASK(5, 0), 0x1));
+		   BIT(24) | FIELD_PREP(GENMASK(20, 16), hsgmii ? 0 : 1) |
+			   BIT(8) | FIELD_PREP(GENMASK(5, 0), hsgmii ? 11 : 1));
 	airoha_rmw(pma, 0x780,
 		   BIT(24) | GENMASK(20, 16) | BIT(8) | GENMASK(5, 0),
-		   BIT(8) | FIELD_PREP(GENMASK(5, 0), 0xb));
+		   BIT(8) | FIELD_PREP(GENMASK(5, 0), hsgmii ? 1 : 11));
 	airoha_rmw(pma, 0x260, 0, BIT(8) | BIT(0));
 
 	/* RX path setup. */
+	if (hsgmii)
+		airoha_rmw(pma, 0x178, GENMASK(18, 16), BIT(16));
 	airoha_rmw(pma, 0x374, GENMASK(1, 0),
-		   FIELD_PREP(GENMASK(1, 0), BIT(1)));
+		   FIELD_PREP(GENMASK(1, 0), hsgmii ? 0 : 2));
 	airoha_rmw(pma, 0x184, GENMASK(26, 16) | GENMASK(10, 0),
 		   FIELD_PREP(GENMASK(26, 16), 0x400) |
 			   FIELD_PREP(GENMASK(10, 0), 0x3ff));
@@ -1463,6 +1501,8 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 		   FIELD_PREP(GENMASK(28, 24), 0x0) | BIT(2));
 	airoha_rmw(pma, 0x88c, BIT(8) | GENMASK(1, 0), 0);
 	airoha_rmw(pma, 0x768, BIT(24) | GENMASK(19, 16), 0);
+	if (hsgmii)
+		airoha_rmw(pma, 0x79c, BIT(8) | GENMASK(5, 0), BIT(8));
 	airoha_rmw(pma, 0x390, GENMASK(15, 0), FIELD_PREP(GENMASK(15, 0), 0x1));
 	airoha_rmw(pma, 0x394, GENMASK(31, 16) | GENMASK(15, 0),
 		   FIELD_PREP(GENMASK(31, 16), 0xffff));
@@ -1491,23 +1531,23 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 		   FIELD_PREP(GENMASK(31, 16), 0x32) |
 			   FIELD_PREP(GENMASK(15, 0), 0x2));
 	airoha_rmw(pma, 0x76c, BIT(24) | GENMASK(17, 16),
-		   BIT(24) | FIELD_PREP(GENMASK(17, 16), 0x0));
-	airoha_rmw(ana, 0xdc, BIT(8), 0);
+		   BIT(24) | FIELD_PREP(GENMASK(17, 16), hsgmii ? 1 : 0));
+	airoha_rmw(ana, 0xdc, BIT(8), hsgmii ? BIT(8) : 0);
 	airoha_rmw(ana, 0xe8, GENMASK(26, 8) | GENMASK(1, 0),
 		   FIELD_PREP(GENMASK(26, 8), 0x20000) |
-			   FIELD_PREP(GENMASK(1, 0), 0x0));
+			   FIELD_PREP(GENMASK(1, 0), hsgmii ? 1 : 0));
 	airoha_rmw(ana, 0xf8,
 		   GENMASK(26, 24) | GENMASK(19, 16) | GENMASK(11, 8) |
 			   GENMASK(6, 0),
 		   FIELD_PREP(GENMASK(26, 24), 0x4) |
 			   FIELD_PREP(GENMASK(19, 16), 0x1) |
 			   FIELD_PREP(GENMASK(11, 8), 0x8) |
-			   FIELD_PREP(GENMASK(6, 0), BIT(3)));
+			   FIELD_PREP(GENMASK(6, 0), hsgmii ? 6 : 8));
 	airoha_rmw(ana, 0xfc,
 		   GENMASK(25, 24) | GENMASK(20, 16) | GENMASK(10, 8) |
 			   GENMASK(2, 0),
 		   FIELD_PREP(GENMASK(25, 24), 0x0) |
-			   FIELD_PREP(GENMASK(20, 16), BIT(3)) |
+			   FIELD_PREP(GENMASK(20, 16), hsgmii ? 6 : 8) |
 			   FIELD_PREP(GENMASK(10, 8), 0x6) |
 			   FIELD_PREP(GENMASK(2, 0), 0x6));
 	airoha_rmw(pma, 0x120, GENMASK(17, 16) | GENMASK(12, 8) | GENMASK(1, 0),
@@ -1523,7 +1563,8 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 	airoha_rmw(ana, 0x118, BIT(24) | BIT(16) | BIT(8) | BIT(0),
 		   BIT(24) | BIT(16) | BIT(8));
 	airoha_rmw(ana, 0x10c, BIT(19) | GENMASK(18, 16),
-		   FIELD_PREP(GENMASK(18, 16), BIT(2) | BIT(1) | BIT(0)));
+		   hsgmii ? BIT(19) | FIELD_PREP(GENMASK(18, 16), 6) :
+			    FIELD_PREP(GENMASK(18, 16), 7));
 	airoha_rmw(pma, 0x824, BIT(24) | BIT(16) | BIT(8) | BIT(0),
 		   BIT(24) | BIT(8));
 	airoha_rmw(pma, 0x81c, BIT(24) | BIT(16) | BIT(8) | BIT(0), BIT(8));
@@ -1531,14 +1572,14 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth,
 	airoha_rmw(pma, 0x84c, BIT(24) | BIT(16) | BIT(8) | BIT(0), BIT(24));
 	airoha_rmw(pma, 0x34c, 0, BIT(24) | BIT(16) | BIT(8) | BIT(0));
 	airoha_rmw(ana, 0x114, GENMASK(20, 16) | GENMASK(9, 8),
-		   FIELD_PREP(GENMASK(20, 16), BIT(1)) |
+		   FIELD_PREP(GENMASK(20, 16), hsgmii ? 6 : 2) |
 			   FIELD_PREP(GENMASK(9, 8), BIT(1)));
 	airoha_rmw(ana, 0x110, GENMASK(25, 24),
 		   FIELD_PREP(GENMASK(25, 24), BIT(1) | BIT(0)));
 	airoha_rmw(pma, 0x350, BIT(0), 0);
 	airoha_rmw(ana, 0xd8, BIT(24) | BIT(16) | GENMASK(9, 8) | GENMASK(7, 0),
-		   BIT(16) | FIELD_PREP(GENMASK(9, 8), BIT(1)) |
-			   FIELD_PREP(GENMASK(7, 0), BIT(6) | BIT(1)));
+		   BIT(16) | FIELD_PREP(GENMASK(9, 8), hsgmii ? 1 : 2) |
+			   FIELD_PREP(GENMASK(7, 0), hsgmii ? 0xb : 0x42));
 	airoha_rmw(ana, 0xcc, BIT(24) | BIT(16), BIT(24));
 	udelay(200);
 	airoha_rmw(pma, 0x824, 0, BIT(16) | BIT(0));
@@ -1590,6 +1631,24 @@ static void airoha_eth_gdm4_pcs_init(struct airoha_eth *eth,
 	pcs->ready = true;
 }
 
+static void airoha_hsgmii_pcs_init(struct airoha_ext_pcs *pcs)
+{
+	/* Keep the PHY firmware and analog tuning installed by the first stage. */
+	airoha_rmw(pcs->multi_sgmii, PCS_MULTI_SGMII_MSG_RX_CTRL_0,
+		   PCS_HSGMII_XFI_SEL, 0);
+	airoha_rmw(pcs->hsgmii, PCS_HSGMII_CTRL_1, 0, PCS_HSGMII_TBI_10B_MODE);
+	airoha_rmw(pcs->hsgmii_an, PCS_HSGMII_AN_CTRL, PCS_HSGMII_AN_ENABLE, 0);
+	airoha_rmw(pcs->hsgmii, PCS_HSGMII_CTRL_6, 0, PCS_HSGMII_TX_ENABLE);
+	airoha_rmw(pcs->rate_adp, PCS_HSGMII_RATE_ADP_P0_CTRL_0, 0,
+		   PCS_HSGMII_DISABLE_MII_MODE);
+	airoha_rmw(pcs->multi_sgmii, PCS_MULTI_SGMII_STS_CTRL_0,
+		   PCS_LINK_MODE_P0 | PCS_FORCE_LINK_P0,
+		   PCS_LINK_MODE_P0_2500 | PCS_FORCE_SPEED_P0);
+	airoha_rmw(pcs->xfi_mac, PCS_XFI_GIB_CFG,
+		   PCS_XFI_RXMPI_STOP | PCS_XFI_RXMBI_STOP |
+		   PCS_XFI_TXMPI_STOP | PCS_XFI_TXMBI_STOP, 0);
+}
+
 #define airoha_fe_rr(eth, offset) airoha_rr((eth)->fe_regs, (offset))
 #define airoha_fe_wr(eth, offset, val) \
 	airoha_wr((eth)->fe_regs, (offset), (val))
@@ -1620,7 +1679,8 @@ static void airoha_switch_fdb_flush(struct airoha_eth *eth)
 {
 	u32 val;
 
-	if (!eth->switch_regs)
+	/* Direct GDM4 recovery has no switch forwarding entries to flush. */
+	if (eth->gdm4_hsgmii || !eth->switch_regs)
 		return;
 
 	airoha_switch_wr(eth, SWITCH_ATC,
@@ -1829,9 +1889,13 @@ static bool airoha_recovery_dual_service_enabled(void)
  */
 static bool airoha_recovery_wan_service_enabled(const struct airoha_eth *eth)
 {
-	return !eth->qdma1_isolated &&
-	       (airoha_recovery_port_is_wan() ||
-		airoha_recovery_dual_service_enabled());
+	if (eth->qdma1_isolated)
+		return false;
+	if (eth->gdm4_hsgmii)
+		return eth->wan_pcs.ready;
+
+	return airoha_recovery_port_is_wan() ||
+	       airoha_recovery_dual_service_enabled();
 }
 
 bool airoha_recovery_dhcp_rx_allowed(struct udevice *dev)
@@ -1844,6 +1908,11 @@ bool airoha_recovery_dhcp_rx_allowed(struct udevice *dev)
 	eth = dev_get_priv(dev);
 	if (!eth || !eth->last_rx_valid)
 		return false;
+
+	if (eth->gdm4_hsgmii)
+		return eth->last_rx_fport == 4 ||
+		       (eth->last_rx_fport == 2 &&
+			airoha_recovery_wan_service_enabled(eth));
 
 	if (airoha_recovery_port_is_wan())
 		return eth->last_rx_fport == 2;
@@ -4271,7 +4340,7 @@ static void airoha_rtl8261_init_one(struct airoha_eth *eth, int phy_addr)
 
 static void airoha_rtl8261_minimal_init(struct airoha_eth *eth)
 {
-	if (!eth->mdio_dev)
+	if (eth->gdm4_hsgmii || !eth->mdio_dev)
 		return;
 
 	airoha_rtl8261_init_one(eth, RTL8261_PHY5_ADDR);
@@ -4488,6 +4557,9 @@ static bool airoha_recovery_gdm4_candidate(struct airoha_eth *eth)
 static void airoha_gdm4_ensure_ready(struct airoha_eth *eth)
 {
 	ulong now = get_timer(0);
+
+	if (eth->gdm4_hsgmii)
+		return;
 
 	if (eth->gdm4_link_up && airoha_usxgmii_link_up(&eth->pcs) &&
 	    airoha_eth_gdm4_have_rx_signal(&eth->pcs)) {
@@ -4827,6 +4899,9 @@ void airoha_recovery_restart_links(struct udevice *dev)
 	ulong down_ms;
 	int ret;
 
+	if (eth->gdm4_hsgmii)
+		return;
+
 	if (!serve_wan) {
 		/*
 		 * A front port was pinned: keep physical WAN traffic out of the
@@ -4931,6 +5006,9 @@ void airoha_recovery_poll_link(struct udevice *dev)
 	u16 speed;
 	bool copper_up, host_ready, link_changed;
 
+	if (eth->gdm4_hsgmii)
+		return;
+
 	/*
 	 * Runs on every loop iteration: the flap has its own 50ms poll
 	 * interval and must not be delayed by the 1s housekeeping rate
@@ -5008,6 +5086,9 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	int forced_fport;
 	bool gdm4_candidate;
 	bool dual_service;
+
+	if (eth->gdm4_hsgmii)
+		return 4;
 
 	forced_fport = airoha_forced_tx_fport(eth);
 	if (forced_fport > 0) {
@@ -6041,13 +6122,15 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 
 	if (eth->scu_regmap) {
 		regmap_update_bits(eth->scu_regmap, SCU_SSR3, SCU_ETH_XSI_SEL,
-				   SCU_ETH_XSI_USXGMII);
+				   eth->gdm4_hsgmii ? SCU_ETH_XSI_HSGMII :
+						      SCU_ETH_XSI_USXGMII);
 		if (IS_ENABLED(CONFIG_BOARD_XR1710G) &&
 		    airoha_recovery_wan_service_enabled(eth))
 			regmap_update_bits(eth->scu_regmap, SCU_SSTR,
 					   SCU_PON_XSI_SEL, SCU_PON_XSI_USXGMII);
-		regmap_update_bits(eth->scu_regmap, SCU_WAN_CONF, SCU_WAN_SEL,
-				   SCU_WAN_SEL_USXGMII);
+		if (!eth->gdm4_hsgmii)
+			regmap_update_bits(eth->scu_regmap, SCU_WAN_CONF,
+					   SCU_WAN_SEL, SCU_WAN_SEL_USXGMII);
 #ifdef CONFIG_BOARD_XR1710G
 		if (airoha_recovery_wan_service_enabled(eth))
 			airoha_recovery_xpon_reset(eth->scu_regmap);
@@ -6072,7 +6155,8 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 			return ret;
 	}
 
-	airoha_eth_gdm4_pcs_init(eth, &eth->pcs);
+	if (!eth->gdm4_hsgmii)
+		airoha_eth_gdm4_pcs_init(eth, &eth->pcs);
 
 	ret = airoha_fe_init(eth);
 	if (ret)
@@ -6232,6 +6316,8 @@ static int airoha_eth_probe(struct udevice *dev)
 	struct regmap *scu_regmap;
 	int i, ret;
 
+	eth->gdm4_hsgmii = dev_read_bool(dev, "airoha,recovery-gdm4-2500base-x");
+
 	scu_regmap = airoha_get_scu_regmap();
 	if (IS_ERR(scu_regmap))
 		return PTR_ERR(scu_regmap);
@@ -6271,8 +6357,10 @@ static int airoha_eth_probe(struct udevice *dev)
 	 * this block up, so without it GDM2 can negotiate a copper link through
 	 * PHY8 and still never move a single frame.
 	 */
-	regmap_update_bits(eth->scu_regmap, SCU_RST_CTRL2, SCU_RST_XPON_PHY, 0);
-	regmap_update_bits(eth->scu_regmap, SCU_RST_CTRL1, SCU_RST_XPON_MAC, 0);
+	if (!eth->gdm4_hsgmii) {
+		regmap_update_bits(eth->scu_regmap, SCU_RST_CTRL2, SCU_RST_XPON_PHY, 0);
+		regmap_update_bits(eth->scu_regmap, SCU_RST_CTRL1, SCU_RST_XPON_MAC, 0);
+	}
 
 	eth->wan_pcs.xfi_mac = map_sysmem(WAN_PCS_XFI_MAC_BASE, 0x1000);
 	eth->wan_pcs.multi_sgmii = map_sysmem(WAN_PCS_MULTI_SGMII_BASE, 0x450);
@@ -6280,6 +6368,12 @@ static int airoha_eth_probe(struct udevice *dev)
 	eth->wan_pcs.rate_adp = map_sysmem(WAN_PCS_HSGMII_RATE_ADP_BASE, 0x300);
 	eth->wan_pcs.ana = map_sysmem(WAN_PCS_XFI_ANA_BASE, 0x1000);
 	eth->wan_pcs.pma = map_sysmem(WAN_PCS_XFI_PMA_BASE, 0x1000);
+	if (eth->gdm4_hsgmii) {
+		eth->pcs.hsgmii_an = map_sysmem(ETH_PCS_HSGMII_AN_BASE, 0x60);
+		eth->pcs.hsgmii = map_sysmem(ETH_PCS_HSGMII_BASE, 0x164);
+		eth->wan_pcs.hsgmii_an = map_sysmem(WAN_PCS_HSGMII_AN_BASE, 0x60);
+		eth->wan_pcs.hsgmii = map_sysmem(WAN_PCS_HSGMII_BASE, 0x164);
+	}
 
 	eth->rsts.resets = devm_kcalloc(dev, AIROHA_MAX_NUM_RSTS,
 					sizeof(struct reset_ctl), GFP_KERNEL);
@@ -6330,7 +6424,7 @@ static int airoha_eth_probe(struct udevice *dev)
 
 	switch_node =
 		ofnode_by_compatible(ofnode_null(), data->switch_compatible);
-	if (ofnode_valid(switch_node)) {
+	if (!eth->gdm4_hsgmii && ofnode_valid(switch_node)) {
 		ofnode mdio_node = airoha_ext_mdio_node(dev);
 
 		if (ofnode_valid(mdio_node))
@@ -6338,6 +6432,123 @@ static int airoha_eth_probe(struct udevice *dev)
 	}
 
 	return airoha_switch_init(dev, eth);
+}
+
+static int airoha_w1701k_read_phy_firmware(void *data)
+{
+	const size_t slot_len = W1701K_PHY_FIRMWARE_LIMIT;
+	struct legacy_img_hdr *header;
+	unsigned long test_addr, len;
+	struct mtd_info *mtd;
+	size_t read_len;
+	int ret;
+
+	header = malloc(slot_len);
+	if (!header)
+		return -ENOMEM;
+
+	/* Load a RAM candidate without changing the installed NAND image. */
+	test_addr = env_get_hex("w1701k_phyfw_addr", 0);
+	if (test_addr) {
+		const void *src = map_sysmem(test_addr, slot_len);
+
+		memcpy(header, src, slot_len);
+		unmap_sysmem(src);
+	} else {
+		mtd_probe_devices();
+		mtd = get_mtd_device_nm("chainloader");
+		if (IS_ERR(mtd)) {
+			ret = PTR_ERR(mtd);
+			goto out;
+		}
+		ret = mtd_read(mtd, W1701K_PHY_FIRMWARE_OFFSET, slot_len,
+			       &read_len, (u8 *)header);
+		put_mtd_device(mtd);
+		if (ret && !mtd_is_bitflip(ret))
+			goto out;
+		if (read_len != slot_len) {
+			ret = -EIO;
+			goto out;
+		}
+	}
+
+	len = image_get_size(header);
+	if (!image_check_magic(header) || !image_check_hcrc(header) ||
+	    !image_check_type(header, IH_TYPE_FIRMWARE) ||
+	    image_get_comp(header) != IH_COMP_GZIP ||
+	    !len || len > slot_len - sizeof(*header) ||
+	    !image_check_dcrc(header)) {
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	ret = gunzip(data, W1701K_PHY_FIRMWARE_SIZE,
+		     (u8 *)image_get_data(header), &len);
+	if (!ret && len != W1701K_PHY_FIRMWARE_SIZE)
+		ret = -EINVAL;
+out:
+	free(header);
+	return ret;
+}
+
+static int airoha_w1701k_init_left(struct udevice *dev, struct airoha_eth *eth)
+{
+	struct airoha_ext_pcs *pcs = &eth->wan_pcs;
+	struct regmap *scu = eth->scu_regmap;
+	struct mdio_perdev_priv *mdio;
+	struct phy_device *phy;
+	ofnode mdio_node, phy_node;
+	void *firmware;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_PHY_AIROHA_EN8811))
+		return -ENOSYS;
+	if (pcs->ready)
+		return 0;
+	if (!eth->switch_mdio_dev)
+		return -ENODEV;
+
+	mdio_node = dev_ofnode(eth->switch_mdio_dev);
+	phy_node = ofnode_find_subnode(mdio_node, "ethernet-phy@f");
+	if (!ofnode_valid(phy_node))
+		return -ENODEV;
+
+	firmware = malloc(W1701K_PHY_FIRMWARE_SIZE);
+	if (!firmware)
+		return -ENOMEM;
+	ret = airoha_w1701k_read_phy_firmware(firmware);
+	if (ret)
+		goto out;
+
+	mdio = dev_get_uclass_priv(eth->switch_mdio_dev);
+	airoha_reset_ext_phys(mdio_node);
+	phy = phy_connect(mdio->mii_bus, W1701K_LEFT_PHY_ADDR, dev,
+			  PHY_INTERFACE_MODE_2500BASEX);
+	if (!phy) {
+		ret = -ENODEV;
+		goto out;
+	}
+	phy->node = phy_node;
+	ret = airoha_en8811h_config(phy, firmware, W1701K_PHY_FIRMWARE_SIZE);
+	if (ret)
+		goto out;
+
+	regmap_update_bits(scu, SCU_SSTR, SCU_PON_XSI_SEL, SCU_PON_XSI_HSGMII);
+	regmap_update_bits(scu, SCU_WAN_CONF, SCU_WAN_SEL, SCU_WAN_SEL_HSGMII);
+	regmap_update_bits(scu, SCU_RST_CTRL2, SCU_RST_XPON_PHY, 0);
+	regmap_update_bits(scu, SCU_RST_CTRL1, SCU_RST_XPON_MAC, 0);
+	airoha_eth_pcs_pre_config(pcs);
+	airoha_eth_gdm4_phya_init(eth, pcs);
+	airoha_rmw(pcs->rate_adp, PCS_HSGMII_RATE_ADAPT_CTRL_0,
+		   PCS_HSGMII_RATE_ADAPT_RX_BYPASS | PCS_HSGMII_RATE_ADAPT_TX_BYPASS |
+		   PCS_HSGMII_RATE_ADAPT_RX_EN | PCS_HSGMII_RATE_ADAPT_TX_EN,
+		   PCS_HSGMII_RATE_ADAPT_RX_EN | PCS_HSGMII_RATE_ADAPT_TX_EN);
+	airoha_hsgmii_pcs_init(pcs);
+	airoha_eth_pcs_post_config(pcs);
+	pcs->ready = true;
+out:
+	free(firmware);
+	return ret;
 }
 
 static int airoha_eth_init(struct udevice *dev)
@@ -6350,6 +6561,12 @@ static int airoha_eth_init(struct udevice *dev)
 		return -ENODEV;
 
 	airoha_recovery_runtime_reset(eth);
+	if (eth->gdm4_hsgmii && !eth->qdma1_isolated) {
+		ret = airoha_w1701k_init_left(dev, eth);
+		if (ret)
+			printf("airoha: W1701K left port unavailable (%d), serving right port\n",
+			       ret);
+	}
 	/* Retry only RTL8261 PHYs whose earlier initialization did not finish. */
 	airoha_rtl8261_minimal_init(eth);
 	/*
@@ -6357,7 +6574,7 @@ static int airoha_eth_init(struct udevice *dev)
 	 * (wan, auto or dual), not only in the WAN-only mode: a previous session
 	 * that forced a front port leaves PHY8 powered down.
 	 */
-	if (airoha_recovery_wan_service_enabled(eth)) {
+	if (!eth->gdm4_hsgmii && airoha_recovery_wan_service_enabled(eth)) {
 		ret = airoha_recovery_rtl8261_set_power(eth, RTL8261_PHY8_ADDR, true);
 		if (ret)
 			printf("airoha: PHY %d power-up failed: %d\n",
@@ -6365,7 +6582,8 @@ static int airoha_eth_init(struct udevice *dev)
 	}
 	airoha_switch_recovery_quiesce(eth);
 	airoha_fe_recovery_runtime_stop(eth);
-	airoha_recovery_lan_phy_set_power(eth, false, false);
+	if (!eth->gdm4_hsgmii)
+		airoha_recovery_lan_phy_set_power(eth, false, false);
 
 	/* Use the same DMA instance for WAN ingress and egress until stop. */
 	wan_recovery = IS_ENABLED(CONFIG_BOARD_XR1710G) &&
@@ -6398,6 +6616,11 @@ static int airoha_eth_init(struct udevice *dev)
 		airoha_qdma_set(qdma, REG_QDMA_GLOBAL_CFG,
 				GLOBAL_CFG_TX_DMA_EN_MASK |
 					GLOBAL_CFG_RX_DMA_EN_MASK);
+	}
+
+	if (eth->gdm4_hsgmii) {
+		airoha_hsgmii_pcs_init(&eth->pcs);
+		return 0;
 	}
 
 	airoha_recovery_lan_phy_set_power(eth, true, true);
@@ -6561,6 +6784,12 @@ static u8 airoha_pick_packet_tx_fport(struct airoha_eth *eth,
 {
 	u8 fport;
 
+	if (eth->gdm4_hsgmii) {
+		fport = airoha_peer_fport_lookup(eth, packet);
+		return fport == 2 && airoha_recovery_wan_service_enabled(eth) ?
+		       2 : 4;
+	}
+
 	if (!airoha_recovery_dual_service_enabled() || length < ARP_HLEN)
 		return airoha_pick_tx_fport(eth);
 
@@ -6585,7 +6814,8 @@ static u8 airoha_pick_packet_tx_fport(struct airoha_eth *eth,
 static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 {
 	struct airoha_eth *eth = dev_get_priv(dev);
-	bool dual_service = airoha_recovery_dual_service_enabled();
+	bool dual_service = eth->gdm4_hsgmii ||
+			    airoha_recovery_dual_service_enabled();
 	bool send_lan = false, send_10g = false, send_wan = false;
 	int attempts = 0, successes = 0;
 	int first_err = -EAGAIN;
@@ -6627,10 +6857,10 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 		 * idle costs one descriptor and is dropped by the MAC, and pinning
 		 * a front port is what keeps the WAN side out of the exchange.
 		 */
-		send_lan = true;
-		send_10g = airoha_recovery_accept_gdm4_rx();
+		send_lan = !eth->gdm4_hsgmii;
+		send_10g = eth->gdm4_hsgmii || airoha_recovery_accept_gdm4_rx();
 		send_wan = airoha_recovery_wan_service_enabled(eth);
-		if (send_10g && airoha_recovery_gdm4_candidate(eth))
+		if (send_10g && !eth->gdm4_hsgmii && airoha_recovery_gdm4_candidate(eth))
 			airoha_gdm4_ensure_ready(eth);
 
 		if (send_lan) {

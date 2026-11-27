@@ -2545,11 +2545,10 @@ static bool recovery_preserve_ubi_volume(const char *name)
 	if (of_machine_is_compatible("econet,xr1710g") ||
 	    of_machine_is_compatible("econet,xr1710g-ubi") ||
 	    of_machine_is_compatible("gemtek,xr1710g") ||
-	    of_machine_is_compatible("gemtek,xr1710g-ubi"))
-		return !strcmp(name, "factory");
-
-	if (of_machine_is_compatible("gemtek,w1700k") ||
-	    of_machine_is_compatible("gemtek,w1700k-ubi"))
+	    of_machine_is_compatible("gemtek,xr1710g-ubi") ||
+	    of_machine_is_compatible("gemtek,w1700k") ||
+	    of_machine_is_compatible("gemtek,w1700k-ubi") ||
+	    of_machine_is_compatible("gemtek,w1701k"))
 		return !strcmp(name, "factory");
 
 	return false;
@@ -2805,7 +2804,8 @@ static int recovery_ensure_preserved_ubi_volumes(struct recovery_target *target)
 	    of_machine_is_compatible("gemtek,xr1710g") ||
 	    of_machine_is_compatible("gemtek,xr1710g-ubi") ||
 	    of_machine_is_compatible("gemtek,w1700k") ||
-	    of_machine_is_compatible("gemtek,w1700k-ubi")) {
+	    of_machine_is_compatible("gemtek,w1700k-ubi") ||
+	    of_machine_is_compatible("gemtek,w1701k")) {
 		ret = recovery_ensure_ubi_volume_named("factory",
 						       RECOVERY_FACTORY_SIZE,
 						       UBI_STATIC_VOLUME);
