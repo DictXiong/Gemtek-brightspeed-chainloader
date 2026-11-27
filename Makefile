@@ -372,7 +372,7 @@ include $(srctree)/scripts/Makefile.compiler
 
 # Read UBOOTRELEASE from include/config/uboot.release (if it exists)
 UBOOTRELEASE = $(shell cat include/config/uboot.release 2> /dev/null)
-UBOOTVERSION = XR1710G
+UBOOTVERSION = $(if $(filter "airoha/w1701k",$(CONFIG_DEFAULT_DEVICE_TREE)),W1701K,XR1710G)
 export VERSION PATCHLEVEL SUBLEVEL UBOOTRELEASE UBOOTVERSION
 
 # This tree never stamps the "-dirty" suffix into the version string.  The
