@@ -26,6 +26,7 @@
 #define PROP_DIAG "dictxiong,boot-recovery-diag"
 #define NOT_RUN -256
 #define BOOT_TIMEOUT_MS 24000
+#define W1701K_BOOT_TIMEOUT_MS 28000
 #define ARM64_BOOTARGS_SIZE 2048
 #define WATCHDOG_BOOTARGS "watchdog.open_timeout=30"
 #define MAX_NORMAL_ATTEMPTS 2
@@ -237,6 +238,13 @@ U_BOOT_CMD(xr1710g_boot_production, 1, 0, do_xr1710g_boot_production,
 
 static bool recovery_fdt_supported(const void *fdt)
 {
+	if (of_machine_is_compatible("gemtek,w1701k")) {
+		const char *compatible = fdt_stringlist_get(fdt, 0, "compatible",
+							   0, NULL);
+
+		return compatible && !strcmp(compatible, "gemtek,w1701k-ubi");
+	}
+
 	/* The WIRO conversion changes the DTB but keeps the FIT image ID. */
 	return !fdt_node_check_compatible(fdt, 0, "gemtek,xr1710g") &&
 	       fdt_node_check_compatible(fdt, 0, "gemtek,xr1710g-ubi") > 0;
@@ -684,7 +692,9 @@ bool xr1710g_boot_recovery_handoff(struct bootm_headers *images)
 	if (ret)
 		goto out;
 
-	diag.start = ret = wdt_start(wdt, BOOT_TIMEOUT_MS, 0);
+	diag.start = ret = wdt_start(wdt,
+		of_machine_is_compatible("gemtek,w1701k") ?
+		W1701K_BOOT_TIMEOUT_MS : BOOT_TIMEOUT_MS, 0);
 	if (!ret) {
 		diag.write = ret = state_write(&state, create, &attempted);
 		if (ret && (diag.stop = wdt_stop(wdt)))
